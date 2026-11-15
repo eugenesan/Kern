@@ -379,6 +379,8 @@ static esp_err_t queue_capture_buffers(void) {
   return ESP_OK;
 }
 
+video_fmt_t app_video_get_format(void) { return APP_VIDEO_FMT; }
+
 uint32_t app_video_get_buf_size(void) {
   if (app_video.camera_buf_size)
     return (uint32_t)app_video.camera_buf_size;

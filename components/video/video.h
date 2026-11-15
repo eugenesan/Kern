@@ -104,6 +104,14 @@ uint32_t app_video_get_buf_size(void);
 esp_err_t app_video_get_resolution(uint32_t *width, uint32_t *height);
 
 /**
+ * @brief Pixel format delivered to the frame callback.
+ *
+ * Linux/camd delivers APP_VIDEO_FMT_GREY (Y8); the ESP32-P4 pipeline
+ * delivers APP_VIDEO_FMT_RGB565 or RGB888.
+ */
+video_fmt_t app_video_get_format(void);
+
+/**
  * @brief Check whether the video stream is currently running.
  *
  * @return true when app_video_start() has succeeded and app_video_stop() has
