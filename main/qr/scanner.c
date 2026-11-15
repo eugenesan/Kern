@@ -178,6 +178,7 @@ static bool gray_camera = false;
 /* Gray path decodes the full 800x800 crop at 1:1; the PPA path keeps the
  * 600x600 decode frame.  Preview size is unchanged. */
 static uint32_t decode_frame_dim = DECODE_FRAME_SIZE;
+static uint32_t gray_w = 0, gray_h = 0;
 
 // Camera callbacks in progress. Balanced on every path and never forced to
 // zero: camera_pipeline_idle() must not lie about one that is still running.
@@ -323,16 +324,10 @@ static void gray_scale_crop(const uint8_t *src, uint32_t sw, uint32_t sh,
 }
 
 static void gray_frame_operation(const uint8_t *buf, uint32_t w, uint32_t h) {
-  /* Match the PPA geometry: a centred 800x800 crop scaled 3/4 to the
-   * 600x600 decode/preview.  That is enough field of view to aim a code
-   * without hunting, and leaves ~3 px per module for a version 17 code. */
-  uint32_t crop = w < h ? w : h;
-  if (crop > CAMERA_INPUT_CROP)
-    crop = CAMERA_INPUT_CROP;
-  uint32_t ox = (w - crop) / 2;
-  uint32_t oy = (h - crop) / 2;
-  int decode_index = -1;
+  if (!gray_w || !gray_h || w != gray_w || h != gray_h)
+    return;
 
+  int decode_index = -1;
   portENTER_CRITICAL_SAFE(&pool_lock);
   decode_index = frame_pool_acquire(&decode_pool);
   portEXIT_CRITICAL_SAFE(&pool_lock);
@@ -340,23 +335,26 @@ static void gray_frame_operation(const uint8_t *buf, uint32_t w, uint32_t h) {
     PROFILE_COUNT(no_buffer);
     return;
   }
+
+  /* The decoder gets the whole sensor frame at native size: a QR anywhere
+   * in view is found, and the modules keep every captured pixel. */
   uint8_t *decode_frame = decode_buffers[decode_index];
-  gray_scale_crop(buf, w, h, ox, oy, crop, decode_frame, decode_frame_dim,
-                  decode_frame_dim);
+  memcpy(decode_frame, buf, (size_t)w * h);
 
   int preview_index;
   portENTER_CRITICAL_SAFE(&pool_lock);
   preview_index = frame_pool_acquire(&preview_pool);
   portEXIT_CRITICAL_SAFE(&pool_lock);
   if (preview_index >= 0) {
-    if (decode_frame_dim == CAMERA_SCREEN_WIDTH &&
-        decode_frame_dim == CAMERA_SCREEN_HEIGHT)
-      memcpy(preview_buffers[preview_index], decode_frame,
-             (size_t)decode_frame_dim * decode_frame_dim);
-    else
-      gray_scale_crop(decode_frame, decode_frame_dim, decode_frame_dim, 0, 0,
-                      decode_frame_dim, preview_buffers[preview_index],
-                      CAMERA_SCREEN_WIDTH, CAMERA_SCREEN_HEIGHT);
+    /* Preview stays a centred square for aiming; it is not what limits the
+     * decoder any more. */
+    uint32_t crop = w < h ? w : h;
+    if (crop > CAMERA_SCREEN_WIDTH)
+      crop = CAMERA_SCREEN_WIDTH;
+    uint32_t ox = (w - crop) / 2;
+    uint32_t oy = (h - crop) / 2;
+    gray_scale_crop(buf, w, h, ox, oy, crop, preview_buffers[preview_index],
+                    CAMERA_SCREEN_WIDTH, CAMERA_SCREEN_HEIGHT);
     portENTER_CRITICAL_SAFE(&pool_lock);
     frame_pool_finish(&preview_pool, preview_index);
     portEXIT_CRITICAL_SAFE(&pool_lock);
@@ -762,7 +760,7 @@ static bool allocate_frame_buffers(void) {
   // The PPA checks the size it is handed, not just the allocation.
   const size_t line = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
   size_t decode_bytes =
-      gray_camera ? (size_t)decode_frame_dim * decode_frame_dim
+      gray_camera ? (size_t)gray_w * gray_h
                   : YUV420_FRAME_BYTES(DECODE_FRAME_SIZE, DECODE_FRAME_SIZE);
   size_t preview_bytes =
       (size_t)CAMERA_SCREEN_WIDTH * CAMERA_SCREEN_HEIGHT *
@@ -856,8 +854,7 @@ static void qr_decode_task(void *pvParameters) {
     if (qr_buf) {
       PROFILE_START(gray);
       if (gray_camera)
-        memcpy(qr_buf, decode_buffers[frame],
-               (size_t)decode_frame_dim * decode_frame_dim);
+        memcpy(qr_buf, decode_buffers[frame], (size_t)gray_w * gray_h);
       else
         yuv420_extract_luma(decode_buffers[frame], DECODE_FRAME_SIZE,
                             DECODE_FRAME_SIZE, qr_buf);
@@ -1360,7 +1357,17 @@ static bool camera_init(void) {
   xEventGroupSetBits(camera_event_group, CAMERA_EVENT_TASK_RUN);
 
   gray_camera = app_video_get_format() == APP_VIDEO_FMT_GREY;
-  decode_frame_dim = gray_camera ? CAMERA_INPUT_CROP : DECODE_FRAME_SIZE;
+  decode_frame_dim = DECODE_FRAME_SIZE;
+  if (gray_camera) {
+    uint32_t width = 0, height = 0;
+    if (app_video_get_resolution(&width, &height) != ESP_OK || !width ||
+        !height) {
+      width = 960;
+      height = 1280;
+    }
+    gray_w = width;
+    gray_h = height;
+  }
   img_refresh_dsc = (lv_img_dsc_t){
       .header = {.cf = gray_camera ? LV_COLOR_FORMAT_L8
                                    : LV_COLOR_FORMAT_RGB565,
@@ -1374,7 +1381,8 @@ static bool camera_init(void) {
   if (!allocate_frame_buffers())
     return false;
 
-  if (!qr_decoder_init(decode_frame_dim, decode_frame_dim)) {
+  if (!qr_decoder_init(gray_camera ? gray_w : decode_frame_dim,
+                       gray_camera ? gray_h : decode_frame_dim)) {
     ESP_LOGE(TAG, "Failed to initialize QR decoder");
   }
 
