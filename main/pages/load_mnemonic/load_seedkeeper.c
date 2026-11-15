@@ -44,6 +44,8 @@ static lv_obj_t *sk_menu_screen = NULL;
 static ui_menu_t *sk_menu = NULL;
 static ui_text_input_t pin_input = {0};
 static lv_obj_t *progress_dialog = NULL;
+static lv_obj_t *error_panel = NULL;
+static void (*error_retry_cb)(void) = NULL;
 static lv_timer_t *poll_timer = NULL;
 
 static kern_nfc_t nfc = {.fd = -1};
@@ -100,6 +102,82 @@ static void hide_progress(void) {
   if (progress_dialog) {
     lv_obj_del(progress_dialog);
     progress_dialog = NULL;
+  }
+}
+
+static void finish_return(void);
+
+static void error_back_cb(lv_event_t *e) {
+  (void)e;
+  finish_return();
+}
+
+static void error_retry_event_cb(lv_event_t *e) {
+  (void)e;
+  void (*retry)(void) = error_retry_cb;
+  if (error_panel) {
+    lv_obj_del(error_panel);
+    error_panel = NULL;
+  }
+  error_retry_cb = NULL;
+  if (retry)
+    retry();
+}
+
+static void hide_error(void) {
+  if (error_panel) {
+    lv_obj_del(error_panel);
+    error_panel = NULL;
+  }
+  error_retry_cb = NULL;
+}
+
+/* Errors stay on the SeedKeeper page.  A modal dialog outlived the page on
+ * the return path and its callback could then touch deleted LVGL objects. */
+static void show_error(const char *text, void (*retry)(void)) {
+  hide_error();
+  if (!sk_screen)
+    return;
+  error_retry_cb = retry;
+
+  error_panel = lv_obj_create(sk_screen);
+  lv_obj_remove_style_all(error_panel);
+  lv_obj_set_size(error_panel, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(error_panel, bg_color(), 0);
+  lv_obj_set_style_bg_opa(error_panel, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(error_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *label = lv_label_create(error_panel);
+  lv_label_set_text(label, text ? text : "Card error");
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(label, LV_PCT(80));
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(label, theme_font_medium(), 0);
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, -80);
+
+  lv_obj_t *row = lv_obj_create(error_panel);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, LV_PCT(80), 90);
+  lv_obj_align(row, LV_ALIGN_CENTER, 0, 100);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *back = lv_button_create(row);
+  lv_obj_set_size(back, 220, 80);
+  lv_obj_add_event_cb(back, error_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *back_label = lv_label_create(back);
+  lv_label_set_text(back_label, "Back");
+  lv_obj_center(back_label);
+
+  if (retry) {
+    lv_obj_t *again = lv_button_create(row);
+    lv_obj_set_size(again, 220, 80);
+    lv_obj_add_event_cb(again, error_retry_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *again_label = lv_label_create(again);
+    lv_label_set_text(again_label, "Retry");
+    lv_obj_center(again_label);
   }
 }
 
@@ -268,9 +346,9 @@ static void poll_cb(lv_timer_t *timer) {
   if (work_rc != 0) {
     const char *text = work_error[0] ? work_error : "Card error";
     if (work_kind == WORK_LOGIN)
-      dialog_show_error_timeout(text, show_pin, 5000);
+      show_error(text, show_pin);
     else if (work_kind == WORK_EXPORT)
-      dialog_show_error_timeout(text, menu_show, 5000);
+      show_error(text, menu_show);
     else
       finish_return();
     return;
@@ -279,7 +357,7 @@ static void poll_cb(lv_timer_t *timer) {
   switch (work_kind) {
   case WORK_LOGIN:
     if (header_count == 0)
-      dialog_show_error_timeout("No secrets on the card", show_pin, 5000);
+      show_error("No secrets on the card", show_pin);
     else if (header_count == 1) {
       selected_header = 0;
       start_export();
@@ -308,7 +386,7 @@ static void start_worker(work_kind_t kind, const char *title,
   show_progress(title, text);
   if (!worker_task_start("seedkeeper", WORKER_STACK, card_work, &work_done)) {
     hide_progress();
-    dialog_show_error_timeout("Task creation failed", return_callback, 0);
+    show_error("Task creation failed", NULL);
     return;
   }
   poll_timer = lv_timer_create(poll_cb, 100, NULL);
@@ -330,7 +408,7 @@ static void pin_ready_cb(lv_event_t *e) {
   const char *text = lv_textarea_get_text(pin_input.textarea);
   size_t len = text ? strlen(text) : 0;
   if (len < SEEDKEEPER_PIN_MIN || len > SEEDKEEPER_PIN_MAX) {
-    dialog_show_error_timeout("PIN must be 4 to 16 characters", NULL, 0);
+    show_error("PIN must be 4 to 16 characters", show_pin);
     return;
   }
   memcpy(pin, text, len + 1);
@@ -341,6 +419,7 @@ static void pin_ready_cb(lv_event_t *e) {
 
 static void show_pin(void) {
   hide_progress();
+  hide_error();
   if (sk_menu) {
     ui_menu_destroy(sk_menu);
     sk_menu = NULL;
@@ -391,6 +470,7 @@ static ui_menu_callback_t select_cb(size_t index) {
 }
 
 static void menu_show(void) {
+  hide_error();
   if (!sk_menu_screen) {
     sk_menu_screen = theme_create_page_container(lv_screen_active());
     if (!sk_menu_screen)
@@ -480,6 +560,7 @@ void load_seedkeeper_page_destroy(void) {
     poll_timer = NULL;
   }
   hide_progress();
+  hide_error();
   if (sk_menu) {
     ui_menu_destroy(sk_menu);
     sk_menu = NULL;
