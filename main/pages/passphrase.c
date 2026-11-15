@@ -49,6 +49,14 @@ static void keyboard_ready_cb(lv_event_t *e) {
   const char *text = lv_textarea_get_text(text_input.textarea);
   const char *passphrase = (text && text[0] != '\0') ? text : NULL;
 
+  /* No passphrase is the empty string in BIP39.  Do not ask the user to
+   * confirm a passphrase that does not exist; just continue. */
+  if (!passphrase) {
+    if (success_callback)
+      success_callback("");
+    return;
+  }
+
   // A typo looks like plausible dots either way; only the fingerprint it
   // derives makes it visible, without putting the secret on screen.
   char before_hex[BIP32_KEY_FINGERPRINT_LEN * 2 + 1];

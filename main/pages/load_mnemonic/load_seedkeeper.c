@@ -192,6 +192,8 @@ static void card_work(void) {
     size_t entropy_len = 0;
     char passphrase[256];
     size_t passphrase_len = 0;
+    uint8_t stored_seed[64];
+    size_t stored_len = 0;
 
     klog("kern-nexus seedkeeper: exporting id=%04x\n",
          headers[selected_header].id);
@@ -224,7 +226,10 @@ static void card_work(void) {
     klog("kern-nexus seedkeeper: exported %zu bytes\n", secret_len);
     if (seedkeeper_unpack_bip39(secret, secret_len, entropy, sizeof(entropy),
                                 &entropy_len, passphrase, sizeof(passphrase),
-                                &passphrase_len) != 0) {
+                                &passphrase_len) != 0 ||
+        seedkeeper_bip39_master_seed(secret, secret_len, stored_seed,
+                                     sizeof(stored_seed), &stored_len) !=
+            SEEDKEEPER_OK) {
       set_error("Secret is not a BIP39 Masterseed");
       memset(secret, 0, sizeof(secret));
       return;
@@ -247,6 +252,24 @@ static void card_work(void) {
       return;
     }
     memset(entropy, 0, sizeof(entropy));
+
+    /* The card stores the master seed, mnemonic and passphrase together.
+     * Re-derive it here so a wrong passphrase cannot silently load a
+     * different wallet. */
+    uint8_t derived[64];
+    if (stored_len != sizeof(derived) ||
+        kern_bip39_mnemonic_to_seed512(work_mnemonic,
+                                       work_has_passphrase ? work_passphrase
+                                                           : NULL,
+                                       derived, sizeof(derived)) != WALLY_OK ||
+        memcmp(stored_seed, derived, sizeof(derived)) != 0) {
+      set_error("Card secret does not match its seed");
+      memset(stored_seed, 0, sizeof(stored_seed));
+      memset(derived, 0, sizeof(derived));
+      return;
+    }
+    memset(stored_seed, 0, sizeof(stored_seed));
+    memset(derived, 0, sizeof(derived));
     work_rc = 0;
     return;
   }
