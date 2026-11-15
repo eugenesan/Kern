@@ -9,6 +9,7 @@
 #include "../../ui/theme_widgets.h"
 #include "../../utils/session.h"
 #include "../../utils/session_cleanup.h"
+#include "../seedkeeper/seedkeeper_hub.h"
 #include "../settings/firmware_update.h"
 #include "../settings/self_test_page.h"
 #include "security_settings.h"
@@ -162,6 +163,19 @@ static void self_test_cb(void) {
   self_test_page_show();
 }
 
+// ── SeedKeeper ──
+
+static void seedkeeper_return_cb(void) {
+  seedkeeper_hub_page_destroy();
+  ui_menu_show(settings_menu);
+}
+
+static void seedkeeper_cb(void) {
+  ui_menu_hide(settings_menu);
+  seedkeeper_hub_page_create(lv_screen_active(), seedkeeper_return_cb);
+  seedkeeper_hub_page_show();
+}
+
 // ── Category menu callbacks ──
 
 static void brightness_cb(void) { show_brightness_page(); }
@@ -187,6 +201,7 @@ void login_settings_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   return_callback = return_cb;
   settings_screen = theme_create_page_container(parent);
   settings_menu = ui_menu_create(settings_screen, "Settings", settings_back_cb);
+  ui_menu_add_entry(settings_menu, "SeedKeeper", seedkeeper_cb);
   ui_menu_add_entry(settings_menu, "Security", security_cb);
   ui_menu_add_entry(settings_menu, "Screen Brightness", brightness_cb);
   ui_menu_add_entry(settings_menu, "Screensaver", screensaver_cb);
@@ -206,6 +221,7 @@ void login_settings_page_hide(void) {
 
 void login_settings_page_destroy(void) {
   session_cleanup_unregister(login_settings_page_destroy);
+  seedkeeper_hub_page_destroy();
   security_settings_page_destroy();
   self_test_page_destroy();
   destroy_brightness_page();

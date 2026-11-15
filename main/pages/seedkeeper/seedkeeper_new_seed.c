@@ -62,6 +62,7 @@ static void words_back_cb(lv_event_t *e) {
 
 static void words_continue_cb(lv_event_t *e) {
   (void)e;
+  seedkeeper_page_log("kern-nexus newseed: words accepted\n");
   words_destroy();
   seedkeeper_page_hide();
   key_confirmation_page_create_passphrase(
@@ -72,6 +73,7 @@ static void words_continue_cb(lv_event_t *e) {
 }
 
 static void return_from_key_confirmation_cb(void) {
+  seedkeeper_page_log("kern-nexus newseed: key confirmation returned\n");
   key_confirmation_page_destroy();
   words_destroy();
   seedkeeper_new_seed_page_destroy();
@@ -80,6 +82,7 @@ static void return_from_key_confirmation_cb(void) {
 }
 
 static void success_from_key_confirmation_cb(void) {
+  seedkeeper_page_log("kern-nexus newseed: wallet loaded\n");
   key_confirmation_page_destroy();
   words_destroy();
   seedkeeper_new_seed_page_destroy();
@@ -234,12 +237,14 @@ static int step_generate(seedkeeper_card_t *c, void *ctx, char *err,
 
 static void done_generate(void *ctx) {
   (void)ctx;
+  seedkeeper_page_log("kern-nexus newseed: generated, showing words\n");
   words_show();
 }
 
 /* --- lifecycle ---------------------------------------------------------- */
 
 static void card_return_cb(void) {
+  seedkeeper_page_log("kern-nexus newseed: card page returned\n");
   seedkeeper_new_seed_page_destroy();
   if (return_callback)
     return_callback();

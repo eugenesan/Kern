@@ -241,7 +241,8 @@ void load_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
 
   ui_menu_add_entry_with_icon(load_menu, ICON_QR_CODE, "From QR Code",
                               from_qr_code_cb);
-  ui_menu_add_entry(load_menu, "From SeedKeeper", from_seedkeeper_cb);
+  ui_menu_add_entry_with_icon(load_menu, ICON_KEY, "From SeedKeeper",
+                              from_seedkeeper_cb);
   ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_KEYBOARD,
                               "From Manual Input", from_manual_input_cb);
   ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_DRIVE, "From Flash",

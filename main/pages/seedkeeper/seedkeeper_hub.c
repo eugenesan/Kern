@@ -116,10 +116,7 @@ static int step_delete(seedkeeper_card_t *c, void *ctx, char *err,
     seedkeeper_page_describe_status(c->sk.last_sw, err, err_cap);
     return -1;
   }
-  if (rc == 1) {
-    snprintf(err, err_cap, "That secret is already gone");
-    return -1;
-  }
+  /* rc == 1 means the secret is already gone, which is the goal. */
   return 0;
 }
 
@@ -217,7 +214,7 @@ static void delete_confirm_cb(bool confirmed, void *user_data) {
     lv_obj_del(secret_menu_screen);
     secret_menu_screen = NULL;
   }
-  seedkeeper_page_run("Deleting...", step_delete, false, delete_finished,
+  seedkeeper_page_run("Deleting...", step_delete, true, delete_finished,
                        &pending_delete_id);
 }
 
