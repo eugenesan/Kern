@@ -5,6 +5,7 @@
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char *TAG = "SETTINGS";
 static const char *NVS_NAMESPACE = "settings";
@@ -229,7 +230,16 @@ esp_err_t settings_set_expected_owned_signing(bool enabled) {
   return settings_set_bool_and_commit(KEY_EXPECTED_OWNED_SIGNING, enabled);
 }
 
+/* Development switch: /data/kern/dev_no_sleep disables both inactivity
+ * timers, so a device without a PIN is not locked and powered off while it
+ * is being tested over adb.  Absent in a normal install. */
+static bool dev_no_sleep(void) {
+  return access("/data/kern/dev_no_sleep", F_OK) == 0;
+}
+
 uint16_t settings_get_screensaver_timeout(void) {
+  if (dev_no_sleep())
+    return 0;
   return settings_get_u16_or_default(KEY_SCREENSAVER,
                                      SCREENSAVER_TIMEOUT_DEFAULT_SEC);
 }
@@ -239,6 +249,8 @@ esp_err_t settings_set_screensaver_timeout(uint16_t sec) {
 }
 
 uint16_t settings_get_session_timeout(void) {
+  if (dev_no_sleep())
+    return 0;
   return settings_get_u16_or_default(KEY_SESSION_TIMEOUT,
                                      SESSION_TIMEOUT_DEFAULT_SEC);
 }
