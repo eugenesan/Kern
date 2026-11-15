@@ -143,10 +143,31 @@ static void card_work(void) {
     return;
   }
 
-  if (seedkeeper_refresh(&sk) != 0) {
-    set_error("Card removed or not answering");
+  if (nfc.fd < 0 && kern_nfc_open(&nfc) != 0) {
+    set_error("NFC device unavailable");
     return;
   }
+  if (kern_nfc_bring_up(&nfc) != 0) {
+    klog("kern-nexus seedkeeper: no tag\n");
+    set_error("No card found");
+    return;
+  }
+  klog("kern-nexus seedkeeper: tag active\n");
+  seedkeeper_init(&sk, (kern_nfc_transport_t){nfc_transmit}, &nfc);
+  if (seedkeeper_refresh(&sk) != 0) {
+    klog("kern-nexus seedkeeper: select failed sw=%04x\n", sk.last_sw);
+    set_error("Card communication failed");
+    return;
+  }
+  kern_seedkeeper_card_status_t status;
+  if (seedkeeper_card_status(&sk, &status) != 0) {
+    klog("kern-nexus seedkeeper: status failed sw=%04x\n", sk.last_sw);
+    set_error("Could not read card status");
+    return;
+  }
+  klog("kern-nexus seedkeeper: applet v%u.%u, setup=%d, sc=%d\n",
+       status.applet_major, status.applet_minor, status.setup_done,
+       status.needs_secure_channel);
   if (seedkeeper_verify_pin(&sk, pin) != 0) {
     klog("kern-nexus seedkeeper: PIN failed sw=%04x\n", sk.last_sw);
     if (sk.last_sw) {
@@ -255,9 +276,9 @@ static void poll_cb(lv_timer_t *timer) {
   if (work_rc != 0) {
     const char *text = work_error[0] ? work_error : "Card error";
     if (work_kind == WORK_LOGIN)
-      dialog_show_error_timeout(text, show_pin, 0);
+      dialog_show_error_timeout(text, show_pin, 5000);
     else
-      dialog_show_error_timeout(text, return_callback, 0);
+      dialog_show_error_timeout(text, return_callback, 5000);
     return;
   }
 
@@ -346,6 +367,19 @@ static void show_pin(void) {
   if (!pin_input.textarea)
     ui_text_input_create(&pin_input, sk_screen, "PIN", true, pin_ready_cb);
   ui_text_input_show(&pin_input);
+
+  /* Development only: /data/kern/dev_pin fills and submits the PIN. */
+  int fd = open("/data/kern/dev_pin", O_RDONLY);
+  if (fd >= 0) {
+    char dev_pin[SEEDKEEPER_PIN_MAX + 1];
+    ssize_t n = read(fd, dev_pin, SEEDKEEPER_PIN_MAX);
+    close(fd);
+    if (n >= SEEDKEEPER_PIN_MIN && n <= SEEDKEEPER_PIN_MAX) {
+      dev_pin[n] = '\0';
+      lv_textarea_set_text(pin_input.textarea, dev_pin);
+      pin_ready_cb(NULL);
+    }
+  }
 }
 
 static void choose_header(size_t index) {
@@ -440,7 +474,9 @@ void load_seedkeeper_page_create(lv_obj_t *parent, void (*return_cb)(void),
     return;
   theme_create_page_title(sk_screen, "SeedKeeper");
   ui_create_back_button(sk_screen, back_cb);
-  start_discover();
+  /* Ask for the PIN before touching the card: no SELECT, status or PIN-less
+   * command is sent until the user has entered it. */
+  show_pin();
 }
 
 void load_seedkeeper_page_show(void) {
