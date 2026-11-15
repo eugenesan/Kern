@@ -22,6 +22,9 @@
 #include "../../utils/worker_task.h"
 #include "seedkeeper.h"
 #include <kern_wally.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +73,17 @@ static int nfc_transmit(void *ctx, const uint8_t *apdu, size_t apdu_len,
                              sw1, sw2);
 }
 
+static void klog(const char *fmt, ...) {
+  int fd = open("/dev/kmsg", O_WRONLY);
+  if (fd >= 0) {
+    va_list ap;
+    va_start(ap, fmt);
+    vdprintf(fd, fmt, ap);
+    va_end(ap);
+    close(fd);
+  }
+}
+
 static void set_error(const char *text) {
   work_rc = -1;
   snprintf(work_error, sizeof(work_error), "%s", text);
@@ -96,11 +110,16 @@ static void card_work(void) {
       return;
     }
     if (kern_nfc_bring_up(&nfc) != 0) {
+      klog("kern-nexus seedkeeper: no tag\n");
       set_error("No card found");
       return;
     }
+    klog("kern-nexus seedkeeper: tag active\n");
     seedkeeper_init(&sk, (kern_nfc_transport_t){nfc_transmit}, &nfc);
-    if (seedkeeper_select(&sk) != 0) {
+    /* The first APDU after activation is sometimes lost; refresh() retries
+     * a transport failure instead of reporting a dead card. */
+    if (seedkeeper_refresh(&sk) != 0) {
+      klog("kern-nexus seedkeeper: select failed sw=%04x\n", sk.last_sw);
       if (sk.last_sw == SEEDKEEPER_SW_APPLET_NOT_FOUND)
         set_error("Card has no SeedKeeper applet");
       else if (sk.last_sw) {
@@ -113,9 +132,13 @@ static void card_work(void) {
     }
     kern_seedkeeper_card_status_t status;
     if (seedkeeper_card_status(&sk, &status) != 0) {
+      klog("kern-nexus seedkeeper: status failed sw=%04x\n", sk.last_sw);
       set_error("Could not read card status");
       return;
     }
+    klog("kern-nexus seedkeeper: applet v%u.%u, setup=%d, sc=%d\n",
+         status.applet_major, status.applet_minor, status.setup_done,
+         status.needs_secure_channel);
     work_rc = 0;
     return;
   }
@@ -125,6 +148,7 @@ static void card_work(void) {
     return;
   }
   if (seedkeeper_verify_pin(&sk, pin) != 0) {
+    klog("kern-nexus seedkeeper: PIN failed sw=%04x\n", sk.last_sw);
     if (sk.last_sw) {
       char text[64];
       seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
