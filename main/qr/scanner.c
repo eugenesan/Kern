@@ -179,6 +179,10 @@ static bool gray_camera = false;
  * 600x600 decode frame.  Preview size is unchanged. */
 static uint32_t decode_frame_dim = DECODE_FRAME_SIZE;
 static uint32_t gray_w = 0, gray_h = 0;
+/* Gray preview size; Krux uses the full 1080-wide panel, not the PPA square. */
+static uint32_t preview_w = CAMERA_SCREEN_WIDTH;
+static uint32_t preview_h = CAMERA_SCREEN_HEIGHT;
+#define GRAY_PREVIEW_SIZE 1080
 
 // Camera callbacks in progress. Balanced on every path and never forced to
 // zero: camera_pipeline_idle() must not lie about one that is still running.
@@ -310,14 +314,17 @@ static void touch_event_cb(lv_event_t *e);
  * RGB565 conversion, not this row walk. */
 static void gray_scale_crop(const uint8_t *src, uint32_t sw, uint32_t sh,
                             uint32_t crop_x, uint32_t crop_y, uint32_t crop,
-                            uint8_t *dst, uint32_t dw, uint32_t dh) {
+                            uint8_t *dst, uint32_t dw, uint32_t dh,
+                            bool flip_x, bool flip_y) {
   (void)sh;
   for (uint32_t y = 0; y < dh; y++) {
-    uint32_t sy = crop_y + (uint32_t)(((uint64_t)y * crop) / dh);
+    uint32_t sy = flip_y ? (dh - 1 - y) : y;
+    sy = crop_y + (uint32_t)(((uint64_t)sy * crop) / dh);
     const uint8_t *row = src + (size_t)sy * sw;
     uint8_t *out = dst + (size_t)y * dw;
     for (uint32_t x = 0; x < dw; x++) {
-      uint32_t sx = crop_x + (uint32_t)(((uint64_t)x * crop) / dw);
+      uint32_t sx = flip_x ? (dw - 1 - x) : x;
+      sx = crop_x + (uint32_t)(((uint64_t)sx * crop) / dw);
       out[x] = row[sx];
     }
   }
@@ -353,8 +360,10 @@ static void gray_frame_operation(const uint8_t *buf, uint32_t w, uint32_t h) {
       crop = CAMERA_SCREEN_WIDTH;
     uint32_t ox = (w - crop) / 2;
     uint32_t oy = (h - crop) / 2;
+    /* The sensor is mounted rotated relative to the panel; flip both axes
+     * for the preview, as Krux does.  The decoder keeps the raw frame. */
     gray_scale_crop(buf, w, h, ox, oy, crop, preview_buffers[preview_index],
-                    CAMERA_SCREEN_WIDTH, CAMERA_SCREEN_HEIGHT);
+                    preview_w, preview_h, true, true);
     portENTER_CRITICAL_SAFE(&pool_lock);
     frame_pool_finish(&preview_pool, preview_index);
     portEXIT_CRITICAL_SAFE(&pool_lock);
@@ -763,8 +772,7 @@ static bool allocate_frame_buffers(void) {
       gray_camera ? (size_t)gray_w * gray_h
                   : YUV420_FRAME_BYTES(DECODE_FRAME_SIZE, DECODE_FRAME_SIZE);
   size_t preview_bytes =
-      (size_t)CAMERA_SCREEN_WIDTH * CAMERA_SCREEN_HEIGHT *
-      (gray_camera ? 1 : 2);
+      (size_t)preview_w * preview_h * (gray_camera ? 1 : 2);
   decode_buffer_size = (decode_bytes + line - 1) & ~(line - 1);
   preview_buffer_size = (preview_bytes + line - 1) & ~(line - 1);
 
@@ -1371,10 +1379,9 @@ static bool camera_init(void) {
   img_refresh_dsc = (lv_img_dsc_t){
       .header = {.cf = gray_camera ? LV_COLOR_FORMAT_L8
                                    : LV_COLOR_FORMAT_RGB565,
-                 .w = CAMERA_SCREEN_WIDTH,
-                 .h = CAMERA_SCREEN_HEIGHT},
-      .data_size = (uint32_t)CAMERA_SCREEN_WIDTH * CAMERA_SCREEN_HEIGHT *
-                   (gray_camera ? 1 : 2),
+                 .w = preview_w,
+                 .h = preview_h},
+      .data_size = preview_w * preview_h * (gray_camera ? 1 : 2),
       .data = NULL,
   };
 
@@ -1469,8 +1476,15 @@ void qr_scanner_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   lv_obj_add_event_cb(qr_scanner_screen, touch_event_cb, LV_EVENT_CLICKED,
                       NULL);
 
+  if (app_video_get_format() == APP_VIDEO_FMT_GREY) {
+    preview_w = GRAY_PREVIEW_SIZE;
+    preview_h = GRAY_PREVIEW_SIZE;
+  } else {
+    preview_w = CAMERA_SCREEN_WIDTH;
+    preview_h = CAMERA_SCREEN_HEIGHT;
+  }
   lv_obj_t *frame_buffer = lv_obj_create(qr_scanner_screen);
-  lv_obj_set_size(frame_buffer, CAMERA_SCREEN_WIDTH, CAMERA_SCREEN_HEIGHT);
+  lv_obj_set_size(frame_buffer, preview_w, preview_h);
   lv_obj_center(frame_buffer);
   lv_obj_set_style_bg_opa(frame_buffer, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(frame_buffer, 0, 0);
@@ -1480,7 +1494,7 @@ void qr_scanner_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   lv_obj_add_event_cb(frame_buffer, touch_event_cb, LV_EVENT_CLICKED, NULL);
 
   camera_img = lv_img_create(frame_buffer);
-  lv_obj_set_size(camera_img, CAMERA_SCREEN_WIDTH, CAMERA_SCREEN_HEIGHT);
+  lv_obj_set_size(camera_img, preview_w, preview_h);
   lv_obj_center(camera_img);
   lv_obj_clear_flag(camera_img, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_style_bg_color(camera_img, bg_color(), 0);

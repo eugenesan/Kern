@@ -349,6 +349,8 @@ static void show_pin(void) {
   }
   if (!pin_input.textarea)
     ui_text_input_create(&pin_input, sk_screen, "PIN", true, pin_ready_cb);
+  if (pin_input.keyboard)
+    lv_keyboard_set_mode(pin_input.keyboard, LV_KEYBOARD_MODE_NUMBER);
   ui_text_input_show(&pin_input);
 }
 
