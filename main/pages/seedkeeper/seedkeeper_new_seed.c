@@ -33,7 +33,6 @@
 
 static char *new_mnemonic = NULL;
 static uint8_t new_entropy[SEED_BYTES];
-static bool have_entropy = false;
 static void (*return_callback)(void) = NULL;
 static void (*success_callback)(void) = NULL;
 
@@ -132,7 +131,7 @@ static void words_show(void) {
     index++;
     word = strtok(NULL, " ");
   }
-  memset(copy, 0, sizeof(copy));
+  secure_memzero(copy, sizeof(copy));
 
   lv_obj_t *btn = theme_create_button(words_screen, "Continue", true);
   lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -40);
@@ -184,13 +183,21 @@ static int step_generate(seedkeeper_card_t *c, void *ctx, char *err,
     return -1;
   }
 
+  /* The entropy is in RAM now, so the raw secret can go: if anything
+   * below fails, the card is left exactly as it was rather than holding a
+   * half-finished copy. */
+  if (seedkeeper_reset_secret(&c->sk, id) != 0) {
+    seedkeeper_page_describe_status(c->sk.last_sw, err, err_cap);
+    memset(new_entropy, 0, sizeof(new_entropy));
+    return -1;
+  }
+
   SECURE_FREE_STRING(new_mnemonic);
   if (kern_bip39_mnemonic_from_bytes(NULL, new_entropy, SEED_BYTES,
                                      &new_mnemonic) != WALLY_OK ||
       !new_mnemonic) {
     snprintf(err, err_cap, "Could not encode the mnemonic");
     memset(new_entropy, 0, sizeof(new_entropy));
-    seedkeeper_reset_secret(&c->sk, id);
     return -1;
   }
 
@@ -201,7 +208,6 @@ static int step_generate(seedkeeper_card_t *c, void *ctx, char *err,
                                       sizeof(seed)) != WALLY_OK) {
     snprintf(err, err_cap, "Could not derive the seed");
     memset(seed, 0, sizeof(seed));
-    seedkeeper_reset_secret(&c->sk, id);
     return -1;
   }
   rc = seedkeeper_pack_bip39(seed, sizeof(seed), new_entropy, SEED_BYTES, "",
@@ -209,7 +215,6 @@ static int step_generate(seedkeeper_card_t *c, void *ctx, char *err,
   memset(seed, 0, sizeof(seed));
   if (rc != 0) {
     snprintf(err, err_cap, "Could not pack the secret");
-    seedkeeper_reset_secret(&c->sk, id);
     return -1;
   }
   rc = seedkeeper_import_secret(&c->sk, SEEDKEEPER_TYPE_MASTERSEED,
@@ -218,15 +223,10 @@ static int step_generate(seedkeeper_card_t *c, void *ctx, char *err,
   memset(payload, 0, sizeof(payload));
   if (rc != 0) {
     seedkeeper_page_describe_status(c->sk.last_sw, err, err_cap);
-    seedkeeper_reset_secret(&c->sk, id);
     return -1;
   }
-  seedkeeper_page_log("kern-nexus seedkeeper: stored bip39 secret %04x\n", bip39_id);
-
-  /* The raw entropy secret has served its purpose; the BIP-39 Masterseed
-   * is the one to keep. */
-  if (seedkeeper_reset_secret(&c->sk, id) != 0)
-    seedkeeper_page_log("kern-nexus seedkeeper: could not free raw secret %04x\n", id);
+  seedkeeper_page_log("kern-nexus seedkeeper: stored bip39 secret %04x\n",
+                      bip39_id);
 
   memset(new_entropy, 0, sizeof(new_entropy));
   return 0;
@@ -259,7 +259,6 @@ void seedkeeper_new_seed_page_create(lv_obj_t *parent, void (*return_cb)(void),
 
   SECURE_FREE_STRING(new_mnemonic);
   memset(new_entropy, 0, sizeof(new_entropy));
-  have_entropy = false;
 
   seedkeeper_page_create(lv_screen_active(), "New Seed", card_return_cb,
                           card_opened);
@@ -275,7 +274,6 @@ void seedkeeper_new_seed_page_destroy(void) {
   seedkeeper_page_destroy();
   SECURE_FREE_STRING(new_mnemonic);
   memset(new_entropy, 0, sizeof(new_entropy));
-  have_entropy = false;
   return_callback = NULL;
   success_callback = NULL;
 }
