@@ -4,6 +4,7 @@
 #include "key.h"
 #include "psbt_internal.h"
 #include "script_templates.h"
+#include "unified_sighash.h"
 #include "wallet.h"
 #include <esp_log.h>
 #include <stdlib.h>
@@ -162,7 +163,8 @@ bool psbt_fee_is_trusted_for_signing(const struct wally_psbt *psbt,
     size_t sighash = 0;
     if (wally_psbt_get_input_sighash(psbt, i, &sighash) != WALLY_OK)
       sighash = 0;
-    if (!psbt_input_is_taproot(psbt, i) ||
+    if ((!psbt_input_is_taproot(psbt, i) &&
+         !psbt_sighash_is_unified((uint32_t)sighash)) ||
         !psbt_sighash_is_supported((uint32_t)sighash))
       return false;
     any = true;
@@ -235,10 +237,18 @@ uint64_t psbt_output_dust_threshold(const unsigned char *spk, size_t spk_len) {
   return (uint64_t)size * 3000u / 1000u;
 }
 
+/* Bitcoin Knots' opt-in unified sighash is the 0x20 bit with ALL. */
+#define WALLY_SIGHASH_UNIFIED 0x20
+
+bool psbt_sighash_is_unified(uint32_t sighash) {
+  return (sighash & 0xff) == (WALLY_SIGHASH_UNIFIED | WALLY_SIGHASH_ALL);
+}
+
 bool psbt_sighash_is_supported(uint32_t sighash) {
   /* 0 is both the "no PSBT_IN_SIGHASH_TYPE field" encoding and taproot's
    * SIGHASH_DEFAULT; either way libwally signs with ALL semantics. */
-  return sighash == 0 || sighash == WALLY_SIGHASH_ALL;
+  return sighash == 0 || sighash == WALLY_SIGHASH_ALL ||
+         psbt_sighash_is_unified(sighash);
 }
 
 const char *psbt_sighash_name(uint32_t sighash) {
@@ -251,6 +261,8 @@ const char *psbt_sighash_name(uint32_t sighash) {
     return "NONE";
   case WALLY_SIGHASH_SINGLE:
     return "SINGLE";
+  case WALLY_SIGHASH_UNIFIED | WALLY_SIGHASH_ALL:
+    return "UNIFIED|ALL";
   case WALLY_SIGHASH_ALL | WALLY_SIGHASH_ANYONECANPAY:
     return "ALL|ANYONECANPAY";
   case WALLY_SIGHASH_NONE | WALLY_SIGHASH_ANYONECANPAY:
@@ -1125,8 +1137,11 @@ static void drop_unverified_key_path_sigs(struct wally_psbt *psbt,
                                           psbt_sign_result_t *result) {
   struct wally_tx *tx = NULL;
   for (size_t i = 0; i < num_inputs; i++) {
+    size_t sighash = 0;
     if (plan[i].denied || plan[i].had_tap_key_sig ||
-        !tap_key_sig_present(psbt, i))
+        !tap_key_sig_present(psbt, i) ||
+        (wally_psbt_get_input_sighash(psbt, i, &sighash) == WALLY_OK &&
+         psbt_sighash_is_unified((uint32_t)sighash)))
       continue;
     if (!tx && !(tx = psbt_tx_alloc(psbt)))
       break;
@@ -1145,13 +1160,321 @@ static void drop_unverified_key_path_sigs(struct wally_psbt *psbt,
   }
   /* Without the transaction no signature can be checked: drop them all. */
   for (size_t i = 0; i < num_inputs; i++) {
+    size_t sighash = 0;
     if (plan[i].denied || plan[i].had_tap_key_sig ||
-        !tap_key_sig_present(psbt, i))
+        !tap_key_sig_present(psbt, i) ||
+        (wally_psbt_get_input_sighash(psbt, i, &sighash) == WALLY_OK &&
+         psbt_sighash_is_unified((uint32_t)sighash)))
       continue;
     wally_psbt_set_input_taproot_signature(psbt, i, NULL, 0);
     if (result)
       result->bad_keypath++;
   }
+}
+
+/* --- unified opt-in signing ------------------------------------------- */
+
+/* PSBT input field types used below (BIP174/BIP371).  libwally keeps them
+ * in psbt_fields rather than named members. */
+#define PSBT_IN_REDEEM_SCRIPT_FIELD 0x04
+#define PSBT_IN_WITNESS_SCRIPT_FIELD 0x05
+#define PSBT_IN_TAP_MERKLE_ROOT_FIELD 0x18
+
+typedef struct {
+  struct wally_tx *tx;
+  uint8_t *raw;
+  size_t raw_len;
+  ush_spent *spent;
+  uint8_t **scripts;
+  size_t num_inputs;
+} unified_ctx_t;
+
+static void unified_ctx_free(unified_ctx_t *ctx) {
+  if (!ctx)
+    return;
+  if (ctx->scripts) {
+    for (size_t i = 0; i < ctx->num_inputs; i++)
+      free(ctx->scripts[i]);
+  }
+  free(ctx->scripts);
+  free(ctx->spent);
+  free(ctx->raw);
+  if (ctx->tx)
+    wally_tx_free(ctx->tx);
+  memset(ctx, 0, sizeof(*ctx));
+}
+
+/* The digest commits to every input's amount and script, so the PSBT must
+ * carry a trustworthy utxo for all of them. */
+static bool unified_ctx_build(const struct wally_psbt *psbt,
+                              unified_ctx_t *ctx) {
+  size_t num_inputs = 0;
+
+  memset(ctx, 0, sizeof(*ctx));
+  if (wally_psbt_get_num_inputs(psbt, &num_inputs) != WALLY_OK || !num_inputs)
+    return false;
+  ctx->num_inputs = num_inputs;
+  ctx->tx = psbt_tx_alloc(psbt);
+  if (!ctx->tx)
+    return false;
+  if (wally_tx_get_length(ctx->tx, 0, &ctx->raw_len) != WALLY_OK ||
+      !ctx->raw_len)
+    return false;
+  ctx->raw = malloc(ctx->raw_len);
+  ctx->spent = calloc(num_inputs, sizeof(*ctx->spent));
+  ctx->scripts = calloc(num_inputs, sizeof(*ctx->scripts));
+  if (!ctx->raw || !ctx->spent || !ctx->scripts)
+    return false;
+  if (wally_tx_to_bytes(ctx->tx, 0, ctx->raw, ctx->raw_len, &ctx->raw_len) !=
+      WALLY_OK)
+    return false;
+
+  for (size_t i = 0; i < num_inputs; i++) {
+    psbt_input_amount_t amount = psbt_get_input_amount(psbt, i);
+    unsigned char script[128];
+    size_t script_len = 0;
+
+    if (amount.status == PSBT_AMOUNT_MISSING ||
+        amount.status == PSBT_AMOUNT_INVALID)
+      return false;
+    if (!psbt_input_utxo_script(psbt, i, script, sizeof(script), &script_len))
+      return false;
+    ctx->scripts[i] = malloc(script_len ? script_len : 1);
+    if (!ctx->scripts[i])
+      return false;
+    memcpy(ctx->scripts[i], script, script_len);
+    ctx->spent[i].value = amount.value;
+    ctx->spent[i].script = ctx->scripts[i];
+    ctx->spent[i].script_len = script_len;
+  }
+  return true;
+}
+
+static const uint8_t *input_field(const struct wally_psbt_input *inp,
+                                  uint32_t field, size_t *len) {
+  const struct wally_map_item *item =
+      wally_map_get_integer(&inp->psbt_fields, field);
+  if (!item || !item->value_len)
+    return NULL;
+  *len = item->value_len;
+  return item->value;
+}
+
+/* BIP143 scriptCode for the input, or the legacy script being signed. */
+static bool unified_script_code(const struct wally_psbt_input *inp,
+                                const ush_spent *spent, bool segwit,
+                                const uint8_t **code, size_t *code_len,
+                                uint8_t wpkh[25]) {
+  const uint8_t *script = spent->script;
+  size_t len = spent->script_len;
+
+  if (len == 23 && script[0] == OP_HASH160 && script[1] == 20 &&
+      script[22] == OP_EQUAL) {
+    const uint8_t *redeem =
+        input_field(inp, PSBT_IN_REDEEM_SCRIPT_FIELD, &len);
+    if (!redeem)
+      return false;
+    script = redeem;
+    /* Nested P2SH-P2WPKH: scriptCode is the P2PKH inside the redeem script. */
+    if (segwit && len == 22 && script[0] == OP_0 && script[1] == 20) {
+      wpkh[0] = OP_DUP;
+      wpkh[1] = OP_HASH160;
+      wpkh[2] = 20;
+      memcpy(wpkh + 3, script + 2, 20);
+      wpkh[23] = OP_EQUALVERIFY;
+      wpkh[24] = OP_CHECKSIG;
+      *code = wpkh;
+      *code_len = 25;
+      return true;
+    }
+    /* Nested P2SH-P2WSH: use the witness script itself. */
+    if (segwit && len == 34 && script[0] == OP_0 && script[1] == 32) {
+      const uint8_t *witness =
+          input_field(inp, PSBT_IN_WITNESS_SCRIPT_FIELD, &len);
+      if (!witness)
+        return false;
+      *code = witness;
+      *code_len = len;
+      return true;
+    }
+    /* Plain P2SH: the redeem script is what gets signed. */
+    *code = script;
+    *code_len = len;
+    return true;
+  }
+
+  if (segwit) {
+    if (len == 22 && script[0] == OP_0 && script[1] == 20) {
+      wpkh[0] = OP_DUP;
+      wpkh[1] = OP_HASH160;
+      wpkh[2] = 20;
+      memcpy(wpkh + 3, script + 2, 20);
+      wpkh[23] = OP_EQUALVERIFY;
+      wpkh[24] = OP_CHECKSIG;
+      *code = wpkh;
+      *code_len = 25;
+      return true;
+    }
+    if (len == 34 && script[0] == OP_0 && script[1] == 32) {
+      const uint8_t *witness =
+          input_field(inp, PSBT_IN_WITNESS_SCRIPT_FIELD, &len);
+      if (!witness)
+        return false;
+      *code = witness;
+      *code_len = len;
+      return true;
+    }
+  }
+
+  *code = script;
+  *code_len = len;
+  return true;
+}
+
+/* Find the leaf script whose TapLeaf hash is leaf_hash. */
+static const uint8_t *unified_leaf_script(const struct wally_psbt_input *inp,
+                                          const uint8_t leaf_hash[32],
+                                          size_t *len) {
+  for (size_t i = 0; i < inp->taproot_leaf_scripts.num_items; i++) {
+    const struct wally_map_item *item = &inp->taproot_leaf_scripts.items[i];
+    uint8_t hash[32];
+    ush_tapleaf_hash(item->value, item->value_len, hash);
+    if (memcmp(hash, leaf_hash, sizeof(hash)) == 0) {
+      *len = item->value_len;
+      return item->value;
+    }
+  }
+  return NULL;
+}
+
+static size_t unified_sign_input(struct wally_psbt *psbt, size_t i,
+                                 struct ext_key **keys, size_t num_keys,
+                                 const unified_ctx_t *ctx) {
+  struct wally_psbt_input *inp = &psbt->inputs[i];
+  uint32_t sigtype = 0;
+  unsigned hash_type = inp->sighash & 0xff;
+  size_t added = 0;
+  bool taproot;
+
+  if (wally_psbt_get_input_signature_type(psbt, i, &sigtype) != WALLY_OK)
+    sigtype = 0;
+  taproot = sigtype == WALLY_SIGTYPE_SW_V1;
+
+  for (size_t k = 0; k < num_keys; k++) {
+    const struct ext_key *key = keys[k];
+    const uint8_t *pub = key->pub_key;
+    const uint8_t *xonly = pub + 1;
+    uint8_t digest[32];
+    char err[64];
+
+    if (taproot) {
+      unsigned char internal[EC_XONLY_PUBLIC_KEY_LEN];
+      size_t internal_len = 0;
+      bool is_internal =
+          wally_psbt_get_input_taproot_internal_key(
+              psbt, i, internal, sizeof(internal), &internal_len) == WALLY_OK &&
+          internal_len == sizeof(internal) &&
+          memcmp(internal, xonly, sizeof(internal)) == 0;
+
+      if (is_internal && !tap_key_sig_present(psbt, i)) {
+        const struct wally_map_item *root =
+            wally_map_get_integer(&inp->psbt_fields,
+                                  PSBT_IN_TAP_MERKLE_ROOT_FIELD);
+        uint8_t tweaked[EC_PRIVATE_KEY_LEN];
+        uint8_t sig[EC_SIGNATURE_LEN + 1];
+        size_t sig_len = EC_SIGNATURE_LEN;
+
+        if (wally_ec_private_key_bip341_tweak(
+                key->priv_key + 1, EC_PRIVATE_KEY_LEN,
+                root ? root->value : NULL, root ? root->value_len : 0, 0,
+                tweaked, sizeof(tweaked)) != WALLY_OK)
+          continue;
+        if (ush_sighash(ctx->raw, ctx->raw_len, (unsigned)i, 2, hash_type,
+                        NULL, 0, ctx->spent, ctx->num_inputs, digest, err,
+                        sizeof(err)) != 0)
+          continue;
+        if (wally_ec_sig_from_bytes(tweaked, sizeof(tweaked), digest,
+                                    sizeof(digest), EC_FLAG_SCHNORR, sig,
+                                    sig_len) != WALLY_OK)
+          continue;
+        sig[sig_len++] = (uint8_t)hash_type;
+        if (wally_psbt_input_set_taproot_signature(inp, sig, sig_len) ==
+            WALLY_OK)
+          added++;
+      }
+
+      /* Script-path signatures: key = xonly || leaf_hash. */
+      const struct wally_map_item *hashes =
+          wally_map_get(&inp->taproot_leaf_hashes, xonly,
+                        EC_XONLY_PUBLIC_KEY_LEN);
+      if (hashes && hashes->value_len % SHA256_LEN == 0) {
+        for (size_t h = 0; h < hashes->value_len / SHA256_LEN; h++) {
+          const uint8_t *leaf_hash = hashes->value + h * SHA256_LEN;
+          uint8_t sig_key[EC_XONLY_PUBLIC_KEY_LEN + SHA256_LEN];
+          uint8_t sig[EC_SIGNATURE_LEN + 1];
+          size_t sig_len = EC_SIGNATURE_LEN;
+          size_t leaf_len = 0;
+          const uint8_t *leaf =
+              unified_leaf_script(inp, leaf_hash, &leaf_len);
+
+          if (!leaf)
+            continue;
+          memcpy(sig_key, xonly, EC_XONLY_PUBLIC_KEY_LEN);
+          memcpy(sig_key + EC_XONLY_PUBLIC_KEY_LEN, leaf_hash, SHA256_LEN);
+          if (wally_map_get(&inp->taproot_leaf_signatures, sig_key,
+                            sizeof(sig_key)))
+            continue;
+          if (ush_sighash(ctx->raw, ctx->raw_len, (unsigned)i, 3, hash_type,
+                          leaf, leaf_len, ctx->spent, ctx->num_inputs, digest,
+                          err, sizeof(err)) != 0)
+            continue;
+          if (wally_ec_sig_from_bytes(key->priv_key + 1, EC_PRIVATE_KEY_LEN,
+                                      digest, sizeof(digest), EC_FLAG_SCHNORR,
+                                      sig, sig_len) != WALLY_OK)
+            continue;
+          sig[sig_len++] = (uint8_t)hash_type;
+          if (wally_map_add(&inp->taproot_leaf_signatures, sig_key,
+                            sizeof(sig_key), sig, sig_len) == WALLY_OK)
+            added++;
+        }
+      }
+      continue;
+    }
+
+    if (!map_has_key(&inp->keypaths, pub, EC_PUBLIC_KEY_LEN) ||
+        map_has_key(&inp->signatures, pub, EC_PUBLIC_KEY_LEN))
+      continue;
+
+    uint8_t wpkh[25];
+    const uint8_t *code = NULL;
+    size_t code_len = 0;
+    unsigned script_type = sigtype == WALLY_SIGTYPE_SW_V0 ? 1 : 0;
+    if (!unified_script_code(inp, &ctx->spent[i], script_type == 1, &code,
+                             &code_len, wpkh))
+      continue;
+
+    uint8_t compact[EC_SIGNATURE_LEN];
+    size_t compact_len = sizeof(compact);
+    uint8_t der[EC_SIGNATURE_LEN + 16];
+    size_t der_len = sizeof(der);
+
+    if (ush_sighash(ctx->raw, ctx->raw_len, (unsigned)i, script_type,
+                    hash_type, code, code_len, ctx->spent, ctx->num_inputs,
+                    digest, err, sizeof(err)) != 0)
+      continue;
+    if (wally_ec_sig_from_bytes(key->priv_key + 1, EC_PRIVATE_KEY_LEN, digest,
+                                sizeof(digest), EC_FLAG_ECDSA | EC_FLAG_GRIND_R,
+                                compact, compact_len) != WALLY_OK)
+      continue;
+    if (wally_ec_sig_to_der(compact, compact_len, der, sizeof(der), &der_len) !=
+        WALLY_OK)
+      continue;
+    der[der_len++] = (uint8_t)hash_type;
+    if (wally_psbt_input_add_signature(inp, pub, EC_PUBLIC_KEY_LEN, der,
+                                       der_len) == WALLY_OK)
+      added++;
+  }
+  return added;
 }
 
 size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
@@ -1177,6 +1500,21 @@ size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
   }
 
   size_t signatures_added = 0;
+  unified_ctx_t unified = {0};
+  bool have_unified = false;
+
+  for (size_t i = 0; i < num_inputs; i++) {
+    size_t sighash = 0;
+    if (wally_psbt_get_input_sighash(psbt, i, &sighash) == WALLY_OK &&
+        psbt_sighash_is_unified((uint32_t)sighash)) {
+      have_unified = true;
+      break;
+    }
+  }
+  if (have_unified && !unified_ctx_build(psbt, &unified)) {
+    ESP_LOGE(TAG, "Missing utxo data for a unified-sighash signature");
+    goto cleanup;
+  }
 
   /* Classify everything up front, then freeze the inputs we will not sign.
    * Bailing on a snapshot failure rather than signing unprotected. */
@@ -1223,6 +1561,17 @@ size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
       plan[i].attempted = true;
       memcpy(plan[i].signing_pubkeys[plan[i].num_signing_pubkeys++],
              keys[p]->pub_key, EC_PUBLIC_KEY_LEN);
+    }
+
+    size_t input_sighash = 0;
+    if (wally_psbt_get_input_sighash(psbt, i, &input_sighash) != WALLY_OK)
+      input_sighash = 0;
+    if (psbt_sighash_is_unified((uint32_t)input_sighash)) {
+      signatures_added += unified_sign_input(psbt, i, keys, num_paths,
+                                             &unified);
+      for (size_t p = 0; p < num_paths; p++)
+        bip32_key_free(keys[p]);
+      continue;
     }
 
     /* libwally stops looking at an input's taproot keys once it holds a
@@ -1280,6 +1629,7 @@ size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
   }
 
 cleanup:
+  unified_ctx_free(&unified);
   for (size_t i = 0; i < num_inputs; i++)
     release_input_state(&plan[i]);
   free(plan);

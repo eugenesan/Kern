@@ -9,6 +9,7 @@
 typedef struct {
   bool any_signable;
   bool signs_taproot;
+  bool signs_unified;
   bool need_permissive;
   bool need_expected_owned;
 } gate_scan_t;
@@ -45,6 +46,12 @@ static void scan_inputs(struct wally_psbt *psbt,
     if (own->ownership != PSBT_OWNERSHIP_EXTERNAL &&
         psbt_input_is_taproot(psbt, i))
       scan->signs_taproot = true;
+    if (own->ownership != PSBT_OWNERSHIP_EXTERNAL) {
+      size_t sighash = 0;
+      if (wally_psbt_get_input_sighash(psbt, i, &sighash) == WALLY_OK &&
+          psbt_sighash_is_unified((uint32_t)sighash))
+        scan->signs_unified = true;
+    }
     switch (own->ownership) {
     case PSBT_OWNERSHIP_OWNED_SAFE:
       scan->any_signable = true;
@@ -176,7 +183,7 @@ psbt_gate_t psbt_gate_check(struct wally_psbt *psbt,
   }
   /* A taproot signature commits to every input's amount, so signing would
    * fail only after the user approved the transaction. */
-  if (scan.signs_taproot && amounts->missing)
+  if ((scan.signs_taproot || scan.signs_unified) && amounts->missing)
     return PSBT_GATE_TAPROOT_MISSING_AMOUNT;
   if (scan.need_expected_owned && !settings->expected_owned)
     return PSBT_GATE_EXPECTED_OWNED;

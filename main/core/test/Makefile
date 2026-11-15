@@ -20,6 +20,7 @@ WALLY_DEPS := $(WALLY_DIR)/config.h $(wildcard $(WALLY_INC)/*.h) \
 	$(shell find $(WALLY_DIR)/upstream/src -name '*.[ch]' -o -name '*.inl' 2>/dev/null)
 
 WALLY_PRIV_INCS = \
+	-I$(ROOT)/third_party/mbedtls/include \
 	-I$(WALLY_DIR) \
 	-I$(WALLY_DIR)/upstream \
 	-I$(WALLY_DIR)/upstream/src \
@@ -37,7 +38,7 @@ WALLY_CFLAGS = $(WALLY_PRIV_INCS) $(WALLY_DEFS)
 ESP_STUBS_INC = stubs
 
 # Test includes: wally public headers + esp stubs + main source tree
-TEST_INCS = -I$(ROOT)/components/bip138/include -I$(WALLY_INC) -I$(WALLY_DIR) -I$(ROOT)/components/secure_memory/include -I$(ESP_STUBS_INC) -I$(ROOT)/main
+TEST_INCS = -I$(ROOT)/third_party/mbedtls/include -I$(ROOT)/components/bip138/include -I$(WALLY_INC) -I$(WALLY_DIR) -I$(ROOT)/components/secure_memory/include -I$(ESP_STUBS_INC) -I$(ROOT)/main
 
 # KEF pulls in crypto_utils/entropy_pool/deflate_codec, which need a handful of
 # ESP-IDF headers.  Reuse the simulator's stub headers instead of a second copy;
@@ -97,7 +98,7 @@ VALIDATOR_KEYED_STUB_SRC = stubs/validator_keyed_stub.c
 SRCS_REG_PARSE = test_registry_parse.c
 TARGET_REG_PARSE = test_registry_parse
 
-PSBT_SRC = ../psbt.c ../psbt_internal.h ../key.h $(PSBT_H)
+PSBT_SRC = ../psbt.c ../psbt_internal.h ../key.h $(PSBT_H) ../unified_sighash.c ../unified_sha256.c ../unified_sighash.h ../unified_sha256.h
 SRCS_PSBT_CLASSIFY = test_psbt_classify.c
 TARGET_PSBT_CLASSIFY = test_psbt_classify
 PSBT_KEY_OBJ = test_psbt_key.o
@@ -247,7 +248,7 @@ $(PSBT_KEY_OBJ): $(KEY_SRC) $(LIBWALLY)
 	$(CC) $(CFLAGS) $(TEST_INCS) -Dkey_get_fingerprint=key_get_fingerprint_raw -c -o $@ ../key.c
 
 $(TARGET_PSBT_CLASSIFY): $(SRCS_PSBT_CLASSIFY) ../settings.h $(PSBT_SRC) ../psbt_gate.c ../psbt_gate.h $(SS_SRC) $(KEY_SRC) $(REGISTRY_SRC) $(REGISTRY_PERSIST_STUB_SRC) $(VALIDATOR_KEYED_STUB_SRC) $(DESCRIPTOR_CHECKSUM_SRC) $(DESCRIPTOR_PARSE_SRC) $(LIBWALLY) $(PSBT_KEY_OBJ) $(CRYPTO_INIT_LIB)
-	$(CC) $(CFLAGS) $(TEST_INCS) -DPSBT_TESTING -Wl,--wrap=malloc -Wl,--wrap=wally_psbt_signing_cache_disable -Wl,--wrap=wally_descriptor_to_script -o $@ $(SRCS_PSBT_CLASSIFY) $(PSBT_KEY_OBJ) ../ss_whitelist.c ../registry.c $(REGISTRY_PERSIST_STUB_SRC) $(VALIDATOR_KEYED_STUB_SRC) ../psbt.c ../psbt_gate.c ../bip32_path.c ../script_templates.c ../descriptor_checksum.c ../descriptor_parse.c $(CRYPTO_INIT_LIB) $(LIBWALLY) -lmbedcrypto
+	$(CC) $(CFLAGS) $(TEST_INCS) -DPSBT_TESTING -Wl,--wrap=malloc -Wl,--wrap=wally_psbt_signing_cache_disable -Wl,--wrap=wally_descriptor_to_script -o $@ $(SRCS_PSBT_CLASSIFY) $(PSBT_KEY_OBJ) ../ss_whitelist.c ../registry.c $(REGISTRY_PERSIST_STUB_SRC) $(VALIDATOR_KEYED_STUB_SRC) ../psbt.c ../psbt_gate.c ../bip32_path.c ../script_templates.c ../descriptor_checksum.c ../descriptor_parse.c ../unified_sighash.c ../unified_sha256.c $(CRYPTO_INIT_LIB) $(LIBWALLY) -lmbedcrypto
 
 $(TARGET_PSBT_PARSE): $(SRCS_PSBT_PARSE) ../psbt_parse.c $(PSBT_H) $(LIBWALLY)
 	$(CC) $(CFLAGS) $(TEST_INCS) -o $@ $(SRCS_PSBT_PARSE) ../psbt_parse.c $(LIBWALLY) -lmbedcrypto
@@ -376,7 +377,7 @@ fuzz_psbt: $(FUZZ_DIR)/fuzz_psbt.c $(FUZZ_DIR)/fuzz_stubs.c $(FUZZ_DEPS) $(PSBT_
 	$(CC) $(CFLAGS) $(TEST_INCS) -o $@ $(FUZZ_DIR)/fuzz_psbt.c $(FUZZ_DIR)/fuzz_stubs.c $(FUZZ_MAIN) \
 		../psbt.c ../psbt_parse.c ../bip322.c ../message_sign.c ../key.c ../registry.c \
 		../ss_whitelist.c ../bip32_path.c ../script_templates.c ../descriptor_checksum.c \
-		../descriptor_parse.c $(REGISTRY_PERSIST_STUB_SRC) $(VALIDATOR_KEYED_STUB_SRC) \
+		../descriptor_parse.c ../unified_sighash.c ../unified_sha256.c $(REGISTRY_PERSIST_STUB_SRC) $(VALIDATOR_KEYED_STUB_SRC) \
 		$(LIBWALLY) -lmbedcrypto
 
 fuzz_descriptor: $(FUZZ_DIR)/fuzz_descriptor.c $(FUZZ_DIR)/fuzz_stubs.c $(FUZZ_DEPS) $(DESC_VALIDATOR_SRC) $(REGISTRY_SRC) $(SS_SRC) $(KEY_SRC)

@@ -14,6 +14,9 @@ static lv_obj_t *passphrase_screen = NULL;
 static ui_text_input_t text_input = {0};
 static void (*return_callback)(void) = NULL;
 static passphrase_success_callback_t success_callback = NULL;
+/* When set, the fingerprint preview uses this mnemonic instead of the key
+ * currently loaded (the load flows call us before loading it). */
+static const char *preview_mnemonic = NULL;
 
 static void back_confirm_cb(bool result, void *user_data) {
   (void)user_data;
@@ -50,12 +53,19 @@ static void keyboard_ready_cb(lv_event_t *e) {
   // derives makes it visible, without putting the secret on screen.
   char before_hex[BIP32_KEY_FINGERPRINT_LEN * 2 + 1];
   char after_hex[BIP32_KEY_FINGERPRINT_LEN * 2 + 1];
-  char *mnemonic = NULL;
-  if (!key_get_fingerprint_hex(before_hex) || !key_get_mnemonic(&mnemonic))
-    return;
-  bool ok =
-      key_mnemonic_passphrase_fingerprint_hex(mnemonic, passphrase, after_hex);
-  SECURE_FREE_STRING(mnemonic);
+  bool ok;
+  if (preview_mnemonic) {
+    ok = key_mnemonic_fingerprint_hex(preview_mnemonic, before_hex) &&
+         key_mnemonic_passphrase_fingerprint_hex(preview_mnemonic, passphrase,
+                                                after_hex);
+  } else {
+    char *mnemonic = NULL;
+    ok = key_get_fingerprint_hex(before_hex) &&
+         key_get_mnemonic(&mnemonic) &&
+         key_mnemonic_passphrase_fingerprint_hex(mnemonic, passphrase,
+                                                after_hex);
+    SECURE_FREE_STRING(mnemonic);
+  }
   if (!ok)
     return;
 
@@ -71,8 +81,8 @@ static void keyboard_ready_cb(lv_event_t *e) {
                       DIALOG_STYLE_OVERLAY);
 }
 
-void passphrase_page_create(lv_obj_t *parent, void (*return_cb)(void),
-                            passphrase_success_callback_t success_cb) {
+static void create_page(lv_obj_t *parent, void (*return_cb)(void),
+                        passphrase_success_callback_t success_cb) {
   session_cleanup_register(passphrase_page_destroy);
   (void)parent;
   return_callback = return_cb;
@@ -91,6 +101,19 @@ void passphrase_page_create(lv_obj_t *parent, void (*return_cb)(void),
   ui_text_input_create(&text_input, passphrase_screen, "passphrase", true,
                        keyboard_ready_cb);
   ui_text_input_enable_scan(&text_input, scan_key_cb, NULL);
+}
+
+void passphrase_page_create(lv_obj_t *parent, void (*return_cb)(void),
+                            passphrase_success_callback_t success_cb) {
+  preview_mnemonic = NULL;
+  create_page(parent, return_cb, success_cb);
+}
+
+void passphrase_page_create_for_mnemonic(
+    lv_obj_t *parent, const char *mnemonic, void (*return_cb)(void),
+    passphrase_success_callback_t success_cb) {
+  preview_mnemonic = mnemonic;
+  create_page(parent, return_cb, success_cb);
 }
 
 void passphrase_page_show(void) {
@@ -116,4 +139,5 @@ void passphrase_page_destroy(void) {
   }
   return_callback = NULL;
   success_callback = NULL;
+  preview_mnemonic = NULL;
 }

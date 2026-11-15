@@ -1,4 +1,5 @@
 #include "key_confirmation.h"
+#include "../passphrase.h"
 #include "../../core/key.h"
 #include "../../core/registry.h"
 #include "../../core/secp_hardening.h"
@@ -22,11 +23,17 @@ static ui_oneshot_t loading_timer;
 static void (*return_callback)(void) = NULL;
 static void (*success_callback)(void) = NULL;
 static char *mnemonic_content = NULL;
+static char *confirmation_passphrase = NULL;
+static char fingerprint_hex_cache[BIP32_KEY_FINGERPRINT_LEN * 2 + 1];
 
 static void loading_timer_cb(lv_timer_t *timer) {
   (void)timer;
   wallet_network_t net = settings_get_network();
-  if (key_load_from_mnemonic(mnemonic_content, NULL,
+  const char *passphrase = (confirmation_passphrase &&
+                            confirmation_passphrase[0])
+                               ? confirmation_passphrase
+                               : NULL;
+  if (key_load_from_mnemonic(mnemonic_content, passphrase,
                              net == WALLET_NETWORK_TESTNET)) {
     if (!wallet_init(net)) {
       dialog_show_error_timeout("Failed to initialize wallet", return_callback,
@@ -99,9 +106,34 @@ static void create_ui(const char *fingerprint_hex) {
   ui_oneshot_start(&loading_timer, loading_timer_cb, LOADING_DELAY_MS);
 }
 
-void key_confirmation_page_create(lv_obj_t *parent, void (*return_cb)(void),
-                                  void (*success_cb)(void), const char *content,
-                                  size_t content_len) {
+static void set_passphrase(const char *passphrase) {
+  SECURE_FREE_STRING(confirmation_passphrase);
+  if (!passphrase)
+    passphrase = "";
+  size_t len = strlen(passphrase);
+  confirmation_passphrase = malloc(len + 1);
+  if (confirmation_passphrase)
+    memcpy(confirmation_passphrase, passphrase, len + 1);
+}
+
+static void passphrase_cancel_cb(void) {
+  void (*callback)(void) = return_callback;
+  passphrase_page_destroy();
+  key_confirmation_page_destroy();
+  if (callback)
+    callback();
+}
+
+static void passphrase_success_cb(const char *passphrase) {
+  set_passphrase(passphrase);
+  passphrase_page_destroy();
+  create_ui(fingerprint_hex_cache);
+}
+
+static void create_common(lv_obj_t *parent, void (*return_cb)(void),
+                          void (*success_cb)(void), const char *content,
+                          size_t content_len, const char *passphrase,
+                          bool passphrase_provided) {
   session_cleanup_register(key_confirmation_page_destroy);
   (void)parent;
   return_callback = return_cb;
@@ -116,13 +148,37 @@ void key_confirmation_page_create(lv_obj_t *parent, void (*return_cb)(void),
     return;
   }
 
-  char fingerprint_hex[BIP32_KEY_FINGERPRINT_LEN * 2 + 1];
-  if (!key_mnemonic_fingerprint_hex(mnemonic_content, fingerprint_hex)) {
+  if (!key_mnemonic_fingerprint_hex(mnemonic_content, fingerprint_hex_cache)) {
     dialog_show_error_timeout("Failed to process mnemonic", return_callback, 0);
     return;
   }
 
-  create_ui(fingerprint_hex);
+  if (passphrase_provided) {
+    set_passphrase(passphrase);
+    create_ui(fingerprint_hex_cache);
+  } else {
+    /* A source without a passphrase still needs the option: the page accepts
+     * an empty entry, which means "no passphrase". */
+    passphrase_page_create_for_mnemonic(lv_screen_active(), mnemonic_content,
+                                        passphrase_cancel_cb,
+                                        passphrase_success_cb);
+    passphrase_page_show();
+  }
+}
+
+void key_confirmation_page_create(lv_obj_t *parent, void (*return_cb)(void),
+                                  void (*success_cb)(void), const char *content,
+                                  size_t content_len) {
+  create_common(parent, return_cb, success_cb, content, content_len, NULL,
+                false);
+}
+
+void key_confirmation_page_create_passphrase(
+    lv_obj_t *parent, void (*return_cb)(void), void (*success_cb)(void),
+    const char *content, size_t content_len, const char *passphrase,
+    bool passphrase_provided) {
+  create_common(parent, return_cb, success_cb, content, content_len, passphrase,
+                passphrase_provided);
 }
 
 void key_confirmation_page_show(void) {
@@ -138,7 +194,9 @@ void key_confirmation_page_hide(void) {
 void key_confirmation_page_destroy(void) {
   session_cleanup_unregister(key_confirmation_page_destroy);
   ui_oneshot_cancel(&loading_timer);
+  passphrase_page_destroy();
   SECURE_FREE_STRING(mnemonic_content);
+  SECURE_FREE_STRING(confirmation_passphrase);
   if (key_confirmation_screen) {
     lv_obj_del(key_confirmation_screen);
     key_confirmation_screen = NULL;

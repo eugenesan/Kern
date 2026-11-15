@@ -213,6 +213,7 @@ typedef struct {
 } psbt_sighash_audit_t;
 
 KERN_WARN_UNUSED_RESULT bool psbt_sighash_is_supported(uint32_t sighash);
+KERN_WARN_UNUSED_RESULT bool psbt_sighash_is_unified(uint32_t sighash);
 
 // Short name for a sighash byte ("NONE", "SINGLE|ANYONECANPAY", ...).
 KERN_WARN_UNUSED_RESULT const char *psbt_sighash_name(uint32_t sighash);

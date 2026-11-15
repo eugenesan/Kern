@@ -12,6 +12,7 @@
 #include "../shared/kef_decrypt_page.h"
 #include "../shared/key_confirmation.h"
 #include "../shared/mnemonic_editor.h"
+#include "load_seedkeeper.h"
 #include "load_storage.h"
 #include "manual_input.h"
 #include "word_numbers_input.h"
@@ -114,6 +115,18 @@ static void success_from_manual_input_cb(void) {
   load_menu_page_destroy();
   home_page_create(lv_screen_active());
   home_page_show();
+}
+
+static void return_from_seedkeeper_cb(void) {
+  load_seedkeeper_page_destroy();
+  load_menu_page_show();
+}
+
+static void from_seedkeeper_cb(void) {
+  load_menu_page_hide();
+  load_seedkeeper_page_create(lv_screen_active(), return_from_seedkeeper_cb,
+                              success_from_key_confirmation_cb);
+  load_seedkeeper_page_show();
 }
 
 static void from_qr_code_cb(void) {
@@ -228,6 +241,7 @@ void load_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
 
   ui_menu_add_entry_with_icon(load_menu, ICON_QR_CODE, "From QR Code",
                               from_qr_code_cb);
+  ui_menu_add_entry(load_menu, "From SeedKeeper", from_seedkeeper_cb);
   ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_KEYBOARD,
                               "From Manual Input", from_manual_input_cb);
   ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_DRIVE, "From Flash",
@@ -250,6 +264,7 @@ void load_menu_page_hide(void) {
 void load_menu_page_destroy(void) {
   session_cleanup_unregister(load_menu_page_destroy);
   destroy_manual_method_menu();
+  load_seedkeeper_page_destroy();
   if (load_menu) {
     ui_menu_destroy(load_menu);
     load_menu = NULL;

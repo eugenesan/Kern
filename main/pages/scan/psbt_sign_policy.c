@@ -168,9 +168,9 @@ bool psbt_sign_policy_allows_review(struct wally_psbt *psbt,
   case PSBT_GATE_TAPROOT_MISSING_AMOUNT:
     snprintf(body, sizeof(body),
              "Input %zu supplies no amount.\n\n"
-             "A taproot signature commits to the amount of every input, so "
-             "this PSBT cannot be signed until the coordinator includes them "
-             "all.",
+             "A taproot or unified signature commits to the amount of every "
+             "input, so this PSBT cannot be signed until the coordinator "
+             "includes them all.",
              report.amounts.first_missing);
     show_cannot_sign(body, dismissed_cb);
     break;

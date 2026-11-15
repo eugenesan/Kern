@@ -21,6 +21,7 @@
 #include "core/psbt.h"
 #include "core/psbt_gate.h"
 #include "core/psbt_internal.h"
+#include "core/unified_sighash.h"
 #include "core/registry.h"
 #include "core/storage.h"
 #include "core/wallet.h"
@@ -1588,20 +1589,113 @@ static void test_sign_refuses_invalid_amount(void) {
 static struct wally_psbt *make_unsafe_psbt(void);
 
 static void test_sighash_supported_set(void) {
-  TEST("psbt_sighash_is_supported: only unset and ALL");
+  TEST("psbt_sighash_is_supported: unset, ALL and UNIFIED|ALL");
 
   if (!psbt_sighash_is_supported(0))
     FAIL("unset/DEFAULT rejected");
   else if (!psbt_sighash_is_supported(WALLY_SIGHASH_ALL))
     FAIL("ALL rejected");
+  else if (!psbt_sighash_is_supported(0x21))
+    FAIL("UNIFIED|ALL rejected");
+  else if (!psbt_sighash_is_unified(0x21))
+    FAIL("UNIFIED|ALL not recognised");
+  else if (strcmp(psbt_sighash_name(0x21), "UNIFIED|ALL") != 0)
+    FAIL("UNIFIED|ALL name");
   else if (psbt_sighash_is_supported(WALLY_SIGHASH_NONE) ||
            psbt_sighash_is_supported(WALLY_SIGHASH_SINGLE) ||
            psbt_sighash_is_supported(WALLY_SIGHASH_ALL |
-                                     WALLY_SIGHASH_ANYONECANPAY))
+                                     WALLY_SIGHASH_ANYONECANPAY) ||
+           psbt_sighash_is_supported(0x22))
     FAIL("non-ALL flag accepted");
   else
     PASS();
 }
+
+
+static void test_unified_sighash_sign(void) {
+  TEST("psbt_sign: UNIFIED|ALL produces a verifying signature");
+
+  struct ext_key *derived = NULL;
+  struct wally_tx *prev = NULL;
+  struct wally_tx *tx = NULL;
+  uint8_t *raw = NULL;
+  size_t raw_len = 0, written = 0;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt || !key_get_derived_key("m/84'/0'/0'/0/0", &derived)) {
+    FAIL("fixture");
+    goto done;
+  }
+
+  set_witness_value(psbt, 100000);
+  const uint32_t path[5] = {0x80000054u, 0x80000000u, 0x80000000u, 0, 0};
+  const uint8_t fp[4] = {0, 0, 0, 0};
+  if (wally_psbt_input_keypath_add(&psbt->inputs[0], derived->pub_key,
+                                   EC_PUBLIC_KEY_LEN, fp, sizeof(fp), path,
+                                   5) != WALLY_OK) {
+    FAIL("keypath");
+    goto done;
+  }
+  wally_psbt_set_input_sighash(psbt, 0, 0x21);
+
+  psbt_sign_policy_t policy = {0};
+  if (psbt_sign(psbt, false, policy, NULL) != 1 ||
+      psbt->inputs[0].signatures.num_items != 1) {
+    FAIL("signing produced no signature");
+    goto done;
+  }
+
+  tx = psbt_tx_alloc(psbt);
+  if (!tx || wally_tx_get_length(tx, 0, &raw_len) != WALLY_OK ||
+      !(raw = malloc(raw_len)) ||
+      wally_tx_to_bytes(tx, 0, raw, raw_len, &written) != WALLY_OK) {
+    FAIL("transaction serialization");
+    goto done;
+  }
+
+  uint8_t code[25] = {0x76, 0xa9, 0x14};
+  memcpy(code + 3, REF_SPK_P2WPKH + 2, 20);
+  code[23] = 0x88;
+  code[24] = 0xac;
+  ush_spent spent = {.value = 100000,
+                     .script = REF_SPK_P2WPKH,
+                     .script_len = sizeof(REF_SPK_P2WPKH)};
+  uint8_t digest[32];
+  char err[64];
+  if (ush_sighash(raw, written, 0, 1, 0x21, code, sizeof(code), &spent, 1,
+                  digest, err, sizeof(err)) != 0) {
+    FAIL("unified digest");
+    goto done;
+  }
+
+  const struct wally_map_item *sig = &psbt->inputs[0].signatures.items[0];
+  uint8_t compact[EC_SIGNATURE_LEN];
+  if (sig->value_len < 2 || sig->value[sig->value_len - 1] != 0x21 ||
+      wally_ec_sig_from_der(sig->value, sig->value_len - 1, compact,
+                            sizeof(compact)) != WALLY_OK) {
+    FAIL("signature encoding");
+    goto done;
+  }
+  if (wally_ec_sig_verify(derived->pub_key, EC_PUBLIC_KEY_LEN, digest,
+                          sizeof(digest), EC_FLAG_ECDSA, compact,
+                          sizeof(compact)) != WALLY_OK) {
+    FAIL("signature does not verify against the unified digest");
+    goto done;
+  }
+  PASS();
+
+done:
+  if (derived)
+    bip32_key_free(derived);
+  if (psbt)
+    wally_psbt_free(psbt);
+  if (prev)
+    wally_tx_free(prev);
+  if (tx)
+    wally_tx_free(tx);
+  free(raw);
+}
+
 
 static void test_sighash_audit_flags_input(void) {
   TEST("psbt_audit_sighash: SIGHASH_NONE input is reported");
@@ -2124,6 +2218,66 @@ static size_t tap_key_sig_len(const struct wally_psbt *psbt, size_t i) {
   if (wally_psbt_get_input_taproot_signature_len(psbt, i, &len) != WALLY_OK)
     return 0;
   return len;
+}
+
+static void test_unified_sighash_taproot(void) {
+  TEST("psbt_sign: UNIFIED|ALL taproot key path verifies");
+
+  const char *descs[] = {TR_BIP86_OURS};
+  struct wally_psbt *psbt = make_tr_psbt(descs, 1, 0, 0, PSBT_VERSIONS[0]);
+  struct wally_tx *tx = NULL;
+  uint8_t *raw = NULL;
+  size_t raw_len = 0, written = 0;
+  uint8_t spk[34];
+  size_t spk_len = 0;
+
+  if (!psbt || !psbt_input_utxo_script(psbt, 0, spk, sizeof(spk), &spk_len) ||
+      spk_len != sizeof(spk)) {
+    FAIL("fixture");
+    goto done;
+  }
+  wally_psbt_set_input_sighash(psbt, 0, 0x21);
+  psbt_sign_policy_t policy = {0};
+  uint8_t sig[EC_SIGNATURE_LEN + 1];
+  size_t sig_len = sizeof(sig);
+  if (psbt_sign(psbt, false, policy, NULL) != 1 ||
+      wally_psbt_get_input_taproot_signature(psbt, 0, sig, sizeof(sig),
+                                             &sig_len) != WALLY_OK ||
+      sig_len != sizeof(sig) || sig[sig_len - 1] != 0x21) {
+    FAIL("missing or malformed taproot signature");
+    goto done;
+  }
+
+  tx = psbt_tx_alloc(psbt);
+  if (!tx || wally_tx_get_length(tx, 0, &raw_len) != WALLY_OK ||
+      !(raw = malloc(raw_len)) ||
+      wally_tx_to_bytes(tx, 0, raw, raw_len, &written) != WALLY_OK) {
+    FAIL("transaction serialization");
+    goto done;
+  }
+
+  ush_spent spent = {.value = 100000, .script = spk, .script_len = spk_len};
+  uint8_t digest[32];
+  char err[64];
+  if (ush_sighash(raw, written, 0, 2, 0x21, NULL, 0, &spent, 1, digest, err,
+                  sizeof(err)) != 0) {
+    FAIL("unified digest");
+    goto done;
+  }
+  if (wally_ec_sig_verify(spk + 2, EC_XONLY_PUBLIC_KEY_LEN, digest,
+                          sizeof(digest), EC_FLAG_SCHNORR, sig,
+                          EC_SIGNATURE_LEN) != WALLY_OK) {
+    FAIL("taproot signature does not verify against the unified digest");
+    goto done;
+  }
+  PASS();
+
+done:
+  if (psbt)
+    wally_psbt_free(psbt);
+  if (tx)
+    wally_tx_free(tx);
+  free(raw);
 }
 
 static void test_tr_bip86_input_owned(void) {
@@ -4882,6 +5036,8 @@ int main(void) {
 
   test_sighash_supported_set();
   test_sighash_audit_flags_input();
+  test_unified_sighash_sign();
+  test_unified_sighash_taproot();
   test_sign_refuses_unsupported_sighash();
   test_fee_percent();
   test_output_destination();

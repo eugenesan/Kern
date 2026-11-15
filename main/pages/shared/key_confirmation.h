@@ -22,6 +22,14 @@
 void key_confirmation_page_create(lv_obj_t *parent, void (*return_cb)(void),
                                   void (*success_cb)(void), const char *content,
                                   size_t content_len);
+
+/* As above, but the source already supplied the BIP39 passphrase.
+ * ``passphrase_provided`` is true even for an empty string; false means the
+ * user is asked for one (press OK with nothing entered to skip). */
+void key_confirmation_page_create_passphrase(
+    lv_obj_t *parent, void (*return_cb)(void), void (*success_cb)(void),
+    const char *content, size_t content_len, const char *passphrase,
+    bool passphrase_provided);
 void key_confirmation_page_show(void);
 void key_confirmation_page_hide(void);
 void key_confirmation_page_destroy(void);
