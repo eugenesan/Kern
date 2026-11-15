@@ -124,7 +124,9 @@ static void card_work(void) {
        * the card back and re-verify the PIN already in hand; do not ask for
        * it a second time. */
       klog("kern-nexus seedkeeper: export link lost, re-activating\n");
+      kern_seedkeeper_card_status_t st;
       if (kern_nfc_bring_up(&nfc) == 0 && seedkeeper_refresh(&sk) == 0 &&
+          seedkeeper_card_status(&sk, &st) == 0 &&
           seedkeeper_verify_pin(&sk, pin) == 0)
         erc = seedkeeper_export_secret(&sk, headers[selected_header].id,
                                        secret, &secret_len);
