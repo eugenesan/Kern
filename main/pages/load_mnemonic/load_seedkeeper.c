@@ -59,6 +59,7 @@ static int work_rc = 0;
 static char work_error[96];
 
 static bool working = false;
+static volatile bool cancel_requested = false;
 static char *work_mnemonic = NULL;
 static char work_passphrase[256];
 static bool work_has_passphrase = false;
@@ -104,110 +105,8 @@ static void hide_progress(void) {
 
 /* Runs on the worker task; never touches LVGL. */
 static void card_work(void) {
-  if (work_kind == WORK_DISCOVER) {
-    if (nfc.fd < 0 && kern_nfc_open(&nfc) != 0) {
-      set_error("NFC device unavailable");
-      return;
-    }
-    if (kern_nfc_bring_up(&nfc) != 0) {
-      klog("kern-nexus seedkeeper: no tag\n");
-      set_error("No card found");
-      return;
-    }
-    klog("kern-nexus seedkeeper: tag active\n");
-    seedkeeper_init(&sk, (kern_nfc_transport_t){nfc_transmit}, &nfc);
-    /* The first APDU after activation is sometimes lost; refresh() retries
-     * a transport failure instead of reporting a dead card. */
-    if (seedkeeper_refresh(&sk) != 0) {
-      klog("kern-nexus seedkeeper: select failed sw=%04x\n", sk.last_sw);
-      if (sk.last_sw == SEEDKEEPER_SW_APPLET_NOT_FOUND)
-        set_error("Card has no SeedKeeper applet");
-      else if (sk.last_sw) {
-        seedkeeper_describe_status(sk.last_sw, work_error,
-                                   sizeof(work_error));
-        work_rc = -1;
-      } else
-        set_error("Card communication failed");
-      return;
-    }
-    kern_seedkeeper_card_status_t status;
-    if (seedkeeper_card_status(&sk, &status) != 0) {
-      klog("kern-nexus seedkeeper: status failed sw=%04x\n", sk.last_sw);
-      set_error("Could not read card status");
-      return;
-    }
-    klog("kern-nexus seedkeeper: applet v%u.%u, setup=%d, sc=%d\n",
-         status.applet_major, status.applet_minor, status.setup_done,
-         status.needs_secure_channel);
-    work_rc = 0;
-    return;
-  }
-
-  if (nfc.fd < 0 && kern_nfc_open(&nfc) != 0) {
-    set_error("NFC device unavailable");
-    return;
-  }
-  if (kern_nfc_bring_up(&nfc) != 0) {
-    klog("kern-nexus seedkeeper: no tag\n");
-    set_error("No card found");
-    return;
-  }
-  klog("kern-nexus seedkeeper: tag active\n");
-  seedkeeper_init(&sk, (kern_nfc_transport_t){nfc_transmit}, &nfc);
-  if (seedkeeper_refresh(&sk) != 0) {
-    klog("kern-nexus seedkeeper: select failed sw=%04x\n", sk.last_sw);
-    set_error("Card communication failed");
-    return;
-  }
-  kern_seedkeeper_card_status_t status;
-  if (seedkeeper_card_status(&sk, &status) != 0) {
-    klog("kern-nexus seedkeeper: status failed sw=%04x\n", sk.last_sw);
-    set_error("Could not read card status");
-    return;
-  }
-  klog("kern-nexus seedkeeper: applet v%u.%u, setup=%d, sc=%d\n",
-       status.applet_major, status.applet_minor, status.setup_done,
-       status.needs_secure_channel);
-  if (seedkeeper_verify_pin(&sk, pin) != 0) {
-    klog("kern-nexus seedkeeper: PIN failed sw=%04x\n", sk.last_sw);
-    if (sk.last_sw) {
-      char text[64];
-      seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
-      set_error(text);
-    } else {
-      set_error("Card communication failed");
-    }
-    return;
-  }
-
-  if (work_kind == WORK_LOGIN) {
-    header_count = MAX_SECRETS;
-    size_t found = MAX_SECRETS;
-    if (seedkeeper_list_headers(&sk, headers, &found) != 0) {
-      klog("kern-nexus seedkeeper: list failed sw=%04x found=%zu\n",
-           sk.last_sw, found);
-      if (sk.last_sw) {
-        char text[64];
-        seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
-        set_error(text);
-      } else {
-        set_error("Card communication failed");
-      }
-      header_count = 0;
-      return;
-    }
-    klog("kern-nexus seedkeeper: %zu headers\n", found);
-    for (size_t i = 0; i < found; i++)
-      klog("kern-nexus seedkeeper: header %04x type=%02x subtype=%02x label=%s\n",
-           headers[i].id, headers[i].type, headers[i].subtype,
-           headers[i].label_valid ? headers[i].label : "?");
-    /* Show every secret the card offers.  If the selected one is not a
-     * BIP39 Masterseed, export reports that instead of hiding it. */
-    header_count = found;
-    work_rc = 0;
-    return;
-  }
-
+  /* A selection uses the session opened by the PIN step.  Do not select the
+   * applet again: that logs the card out and asks for the PIN a second time. */
   if (work_kind == WORK_EXPORT) {
     uint8_t secret[512];
     size_t secret_len = sizeof(secret);
@@ -218,16 +117,27 @@ static void card_work(void) {
 
     klog("kern-nexus seedkeeper: exporting id=%04x\n",
          headers[selected_header].id);
-    if (seedkeeper_export_secret(&sk, headers[selected_header].id, secret,
-                                 &secret_len) != 0) {
-      if (sk.last_sw) {
+    int erc = seedkeeper_export_secret(&sk, headers[selected_header].id, secret,
+                                       &secret_len);
+    if (erc != 0 && sk.last_sw == 0) {
+      /* The ISO-DEP link can idle out while the user reads the menu.  Bring
+       * the card back and re-verify the PIN already in hand; do not ask for
+       * it a second time. */
+      klog("kern-nexus seedkeeper: export link lost, re-activating\n");
+      if (kern_nfc_bring_up(&nfc) == 0 && seedkeeper_refresh(&sk) == 0 &&
+          seedkeeper_verify_pin(&sk, pin) == 0)
+        erc = seedkeeper_export_secret(&sk, headers[selected_header].id,
+                                       secret, &secret_len);
+    }
+    if (erc != 0) {
+      klog("kern-nexus seedkeeper: export failed sw=%04x\n", sk.last_sw);
+      if (sk.last_sw && sk.last_sw != SEEDKEEPER_SW_OK) {
         char text[64];
         seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
         set_error(text);
       } else {
         set_error("Card communication failed");
       }
-      klog("kern-nexus seedkeeper: export failed sw=%04x\n", sk.last_sw);
       memset(secret, 0, sizeof(secret));
       return;
     }
@@ -258,15 +168,83 @@ static void card_work(void) {
     }
     memset(entropy, 0, sizeof(entropy));
     work_rc = 0;
+    return;
   }
+
+  if (nfc.fd < 0 && kern_nfc_open(&nfc) != 0) {
+    set_error("NFC device unavailable");
+    return;
+  }
+  if (kern_nfc_bring_up(&nfc) != 0) {
+    klog("kern-nexus seedkeeper: no tag\n");
+    set_error("No card found");
+    return;
+  }
+  klog("kern-nexus seedkeeper: tag active\n");
+  seedkeeper_init(&sk, (kern_nfc_transport_t){nfc_transmit}, &nfc);
+  if (seedkeeper_refresh(&sk) != 0) {
+    klog("kern-nexus seedkeeper: select failed sw=%04x\n", sk.last_sw);
+    set_error("Card communication failed");
+    return;
+  }
+  kern_seedkeeper_card_status_t status;
+  if (seedkeeper_card_status(&sk, &status) != 0) {
+    klog("kern-nexus seedkeeper: status failed sw=%04x\n", sk.last_sw);
+    set_error("Could not read card status");
+    return;
+  }
+  klog("kern-nexus seedkeeper: applet v%u.%u, setup=%d, sc=%d\n",
+       status.applet_major, status.applet_minor, status.setup_done,
+       status.needs_secure_channel);
+
+  if (seedkeeper_verify_pin(&sk, pin) != 0) {
+    klog("kern-nexus seedkeeper: PIN failed sw=%04x\n", sk.last_sw);
+    if (sk.last_sw && sk.last_sw != SEEDKEEPER_SW_OK) {
+      char text[64];
+      seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
+      set_error(text);
+    } else {
+      set_error("Card authentication failed");
+    }
+    return;
+  }
+
+  header_count = MAX_SECRETS;
+  size_t found = MAX_SECRETS;
+  if (seedkeeper_list_headers(&sk, headers, &found) != 0) {
+    klog("kern-nexus seedkeeper: list failed sw=%04x found=%zu\n",
+         sk.last_sw, found);
+    if (sk.last_sw && sk.last_sw != SEEDKEEPER_SW_OK) {
+      char text[64];
+      seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
+      set_error(text);
+    } else {
+      set_error("Card communication failed");
+    }
+    header_count = 0;
+    return;
+  }
+  klog("kern-nexus seedkeeper: %zu headers\n", found);
+  for (size_t i = 0; i < found; i++)
+    klog("kern-nexus seedkeeper: header %04x type=%02x subtype=%02x label=%s\n",
+         headers[i].id, headers[i].type, headers[i].subtype,
+         headers[i].label_valid ? headers[i].label : "?");
+  header_count = found;
+  work_rc = 0;
 }
 
 static void show_pin(void);
-static void start_discover(void);
 static void start_export(void);
 static void menu_show(void);
 static void key_success_cb(void);
 static void key_return_cb(void);
+
+static void finish_return(void) {
+  void (*callback)(void) = return_callback;
+  load_seedkeeper_page_destroy();
+  if (callback)
+    callback();
+}
 
 static void poll_cb(lv_timer_t *timer) {
   (void)timer;
@@ -280,37 +258,30 @@ static void poll_cb(lv_timer_t *timer) {
   hide_progress();
   working = false;
 
+  if (cancel_requested) {
+    finish_return();
+    return;
+  }
+
   if (work_rc != 0) {
     const char *text = work_error[0] ? work_error : "Card error";
     if (work_kind == WORK_LOGIN)
       dialog_show_error_timeout(text, show_pin, 5000);
+    else if (work_kind == WORK_EXPORT)
+      dialog_show_error_timeout(text, menu_show, 5000);
     else
-      dialog_show_error_timeout(text, return_callback, 5000);
+      finish_return();
     return;
   }
 
   switch (work_kind) {
-  case WORK_DISCOVER:
-    show_pin();
-    break;
   case WORK_LOGIN:
-    if (header_count == 0) {
-      dialog_show_error_timeout("No BIP39 seed on the card", return_callback,
-                                0);
-    } else if (header_count == 1) {
+    if (header_count == 0)
+      dialog_show_error_timeout("No secrets on the card", show_pin, 5000);
+    else if (header_count == 1) {
       selected_header = 0;
       start_export();
-    } else if (access("/data/kern/dev_seed_auto", F_OK) == 0) {
-      for (size_t i = 0; i < header_count; i++) {
-        if (headers[i].type == SEEDKEEPER_TYPE_MASTERSEED &&
-            headers[i].subtype == SEEDKEEPER_SUBTYPE_BIP39) {
-          selected_header = i;
-          start_export();
-          break;
-        }
-      }
     } else {
-      /* The menu is built on the UI thread. */
       menu_show();
     }
     break;
@@ -341,19 +312,15 @@ static void start_worker(work_kind_t kind, const char *title,
   poll_timer = lv_timer_create(poll_cb, 100, NULL);
 }
 
-static void start_discover(void) {
-  if (pin_input.textarea) {
-    ui_text_input_hide(&pin_input);
-    ui_text_input_destroy(&pin_input);
-  }
-  start_worker(WORK_DISCOVER, "SeedKeeper",
-               "Hold the card to the back of the phone...");
-}
-
 static void back_cb(lv_event_t *e) {
   (void)e;
-  if (!working && return_callback)
-    return_callback();
+  if (working) {
+    cancel_requested = true;
+    kern_nfc_cancel();
+    show_progress("SeedKeeper", "Cancelling...");
+    return;
+  }
+  finish_return();
 }
 
 static void pin_ready_cb(lv_event_t *e) {
@@ -367,7 +334,7 @@ static void pin_ready_cb(lv_event_t *e) {
   memcpy(pin, text, len + 1);
   ui_secure_clear_textarea(pin_input.textarea);
   ui_text_input_hide(&pin_input);
-  start_worker(WORK_LOGIN, "SeedKeeper", "Checking PIN...");
+  start_worker(WORK_LOGIN, "SeedKeeper", "Tap the card... (back arrow cancels)");
 }
 
 static void show_pin(void) {
@@ -383,19 +350,6 @@ static void show_pin(void) {
   if (!pin_input.textarea)
     ui_text_input_create(&pin_input, sk_screen, "PIN", true, pin_ready_cb);
   ui_text_input_show(&pin_input);
-
-  /* Development only: /data/kern/dev_pin fills and submits the PIN. */
-  int fd = open("/data/kern/dev_pin", O_RDONLY);
-  if (fd >= 0) {
-    char dev_pin[SEEDKEEPER_PIN_MAX + 1];
-    ssize_t n = read(fd, dev_pin, SEEDKEEPER_PIN_MAX);
-    close(fd);
-    if (n >= SEEDKEEPER_PIN_MIN && n <= SEEDKEEPER_PIN_MAX) {
-      dev_pin[n] = '\0';
-      lv_textarea_set_text(pin_input.textarea, dev_pin);
-      pin_ready_cb(NULL);
-    }
-  }
 }
 
 static void choose_header(size_t index) {
@@ -479,8 +433,14 @@ void load_seedkeeper_page_create(lv_obj_t *parent, void (*return_cb)(void),
   success_callback = success_cb;
   header_count = 0;
   selected_header = 0;
+  memset(headers, 0, sizeof(headers));
+  memset(&sk, 0, sizeof(sk));
+  memset(pin, 0, sizeof(pin));
   nfc.fd = -1;
   work_kind = WORK_NONE;
+  working = false;
+  cancel_requested = false;
+  work_done = false;
   work_mnemonic = NULL;
   work_passphrase[0] = '\0';
   work_has_passphrase = false;
@@ -509,6 +469,7 @@ void load_seedkeeper_page_hide(void) {
 
 void load_seedkeeper_page_destroy(void) {
   session_cleanup_unregister(load_seedkeeper_page_destroy);
+  kern_nfc_cancel();
   worker_task_wait();
   if (poll_timer) {
     lv_timer_del(poll_timer);

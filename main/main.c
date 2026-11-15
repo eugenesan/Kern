@@ -6,8 +6,6 @@
 #include "core/pbkdf2.h"
 #include "core/pin.h"
 #include "core/settings.h"
-#include <unistd.h>
-#include "pages/load_mnemonic/load_seedkeeper.h"
 #include "pages/session_lock.h"
 #include "ui/assets/kern_logo_lvgl.h"
 #include "ui/entropy_input.h"
@@ -134,14 +132,6 @@ void app_main(void) {
 
   // Unlock display
   bsp_display_unlock();
-
-  /* Development hook: open the SeedKeeper page without touch input. */
-  if (access("/data/kern/dev_seedkeeper", F_OK) == 0) {
-    bsp_display_lock(0);
-    load_seedkeeper_page_create(lv_screen_active(), NULL, NULL);
-    load_seedkeeper_page_show();
-    bsp_display_unlock();
-  }
 
   // Everything initialized and UI up — confirm a freshly installed update so
   // the bootloader doesn't roll back to the previous slot
