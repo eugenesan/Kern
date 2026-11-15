@@ -126,22 +126,35 @@ static int step_delete(seedkeeper_card_t *c, void *ctx, char *err,
 /* --- the results -------------------------------------------------------- */
 
 static void done_list(void *ctx) {
-  char text[2048];
+  char text[4096];
   size_t used = 0;
+  int n;
 
   (void)ctx;
   if (header_count == 0) {
     seedkeeper_page_text("The card holds no secrets.");
     return;
   }
-  used = (size_t)snprintf(text, sizeof(text), "%zu secret%s on the card\n",
-                          header_count, header_count == 1 ? "" : "s");
-  for (size_t i = 0; i < header_count && used < sizeof(text); i++) {
-    const char *label = headers[i].label_valid ? headers[i].label : "";
-    used += (size_t)snprintf(text + used, sizeof(text) - used, "\n%04x  %-16s %s",
-                             headers[i].id, label,
-                             secret_type_name(headers[i].type));
+  n = snprintf(text, sizeof(text), "%zu secret%s on the card\n", header_count,
+               header_count == 1 ? "" : "s");
+  if (n < 0)
+    return;
+  used = ((size_t)n < sizeof(text)) ? (size_t)n : sizeof(text) - 1;
+  for (size_t i = 0; i < header_count; i++) {
+    char label[32];
+    const char *name = headers[i].label_valid ? headers[i].label : "";
+    snprintf(label, sizeof(label), "%s", name);
+    n = snprintf(text + used, sizeof(text) - used, "\n%04x  %-16s %s",
+                 headers[i].id, label, secret_type_name(headers[i].type));
+    if (n < 0)
+      break;
+    used += (size_t)n;
+    if (used >= sizeof(text)) {
+      used = sizeof(text) - 1;
+      break;
+    }
   }
+  text[sizeof(text) - 1] = '\0';
   seedkeeper_page_text(text);
 }
 

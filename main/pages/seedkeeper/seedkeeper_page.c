@@ -261,17 +261,31 @@ void seedkeeper_page_error(const char *text, void (*retry)(void)) {
 }
 
 lv_obj_t *seedkeeper_page_text(const char *text) {
+  lv_obj_t *box;
   lv_obj_t *label;
 
   if (!sk_screen)
     return NULL;
-  label = lv_label_create(sk_screen);
+  /* A card can hold a long list, so the text goes into a scrollable box
+   * instead of running off the screen. */
+  box = lv_obj_create(sk_screen);
+  lv_obj_set_size(box, LV_PCT(94), LV_PCT(80));
+  lv_obj_align(box, LV_ALIGN_CENTER, 0, 20);
+  lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(box, 0, 0);
+  lv_obj_set_style_pad_all(box, 4, 0);
+  lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_scroll_dir(box, LV_DIR_VER);
+  lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_START);
+
+  label = lv_label_create(box);
   lv_label_set_text(label, text ? text : "");
   lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(label, LV_PCT(85));
-  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(label, LV_PCT(96));
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
   lv_obj_set_style_text_font(label, theme_font_medium(), 0);
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
   return label;
 }
 
