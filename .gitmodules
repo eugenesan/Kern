@@ -10,3 +10,9 @@
 [submodule "components/bip138"]
 	path = components/bip138
 	url = https://github.com/odudex/bip138.git
+[submodule "third_party/lvgl"]
+	path = third_party/lvgl
+	url = https://github.com/lvgl/lvgl.git
+[submodule "third_party/mbedtls"]
+	path = third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
