@@ -10,6 +10,7 @@
 #include "../../ui/input_helpers.h"
 #include "../../ui/menu.h"
 #include "../../ui/theme_widgets.h"
+#include "../../utils/secure_mem.h"
 #include "../../utils/session_cleanup.h"
 #include "../../utils/worker_task.h"
 #include <fcntl.h>
@@ -28,6 +29,9 @@ static lv_obj_t *error_panel = NULL;
 static void (*error_retry_cb)(void) = NULL;
 
 static seedkeeper_card_t card;
+/* The PIN the user typed, kept between the keyboard callback and the
+ * worker step that opens the card. */
+static char pin_text[SEEDKEEPER_PIN_MAX + 1];
 static void (*return_callback)(void) = NULL;
 static void (*opened_callback)(void) = NULL;
 
@@ -108,18 +112,24 @@ static int card_login(seedkeeper_card_t *c, char *err, size_t err_cap) {
 
 int seedkeeper_card_open(seedkeeper_card_t *c, const char *pin, char *err,
                          size_t err_cap) {
+  char copy[SEEDKEEPER_PIN_MAX + 1];
+  size_t len;
+
   if (!c || !pin) {
     snprintf(err, err_cap, "Bad argument");
     return -1;
   }
-  if (strlen(pin) < SEEDKEEPER_PIN_MIN ||
-      strlen(pin) > SEEDKEEPER_PIN_MAX) {
+  /* The page passes c->pin back in, so copy before clearing the field. */
+  len = strlen(pin);
+  if (len < SEEDKEEPER_PIN_MIN || len > SEEDKEEPER_PIN_MAX) {
     snprintf(err, err_cap, "PIN must be %d to %d characters",
              SEEDKEEPER_PIN_MIN, SEEDKEEPER_PIN_MAX);
     return -1;
   }
+  memcpy(copy, pin, len + 1);
   memset(c->pin, 0, sizeof(c->pin));
-  memcpy(c->pin, pin, strlen(pin) + 1);
+  memcpy(c->pin, copy, len + 1);
+  secure_memzero(copy, sizeof(copy));
   c->logged_in = 0;
 
   if (c->nfc.fd < 0 && kern_nfc_open(&c->nfc) != 0) {
@@ -232,6 +242,7 @@ void seedkeeper_page_error(const char *text, void (*retry)(void)) {
   lv_obj_set_width(label, LV_PCT(80));
   lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_font(label, theme_font_medium(), 0);
+  lv_obj_set_style_text_color(label, error_color(), 0);
   lv_obj_align(label, LV_ALIGN_CENTER, 0, -80);
 
   lv_obj_t *row = lv_obj_create(error_panel);
@@ -384,6 +395,7 @@ static void pin_ready_cb(lv_event_t *e) {
     seedkeeper_page_error("PIN must be 4 to 16 characters", show_pin_input);
     return;
   }
+  memcpy(pin_text, text, len + 1);
   ui_secure_clear_textarea(pin_input.textarea);
   ui_text_input_hide(&pin_input);
   seedkeeper_page_run("Tap the card... (back arrow cancels)", step_open, false,
@@ -394,7 +406,7 @@ static void pin_ready_cb(lv_event_t *e) {
 static int step_open(seedkeeper_card_t *c, void *ctx, char *err,
                      size_t err_cap) {
   (void)ctx;
-  return seedkeeper_card_open(c, c->pin, err, err_cap);
+  return seedkeeper_card_open(c, pin_text, err, err_cap);
 }
 
 /* Runs on the UI thread. */
@@ -433,6 +445,7 @@ void seedkeeper_page_create(lv_obj_t *parent, const char *title,
 
   memset(&card, 0, sizeof(card));
   card.nfc.fd = -1;
+  secure_memzero(pin_text, sizeof(pin_text));
   work_done = false;
   working = false;
   cancel_requested = false;
@@ -480,6 +493,7 @@ void seedkeeper_page_destroy(void) {
   }
   kern_nfc_close(&card.nfc);
   memset(&card, 0, sizeof(card));
+  secure_memzero(pin_text, sizeof(pin_text));
   card.nfc.fd = -1;
   memset(card.pin, 0, sizeof(card.pin));
   memset(work_error, 0, sizeof(work_error));
