@@ -8,6 +8,7 @@
 #include "../../../ui/theme_widgets.h"
 #include "../../../utils/session_cleanup.h"
 #include "../../store_mnemonic.h"
+#include "../../seedkeeper/seedkeeper_backup.h"
 #include "mnemonic_qr.h"
 #include "mnemonic_words.h"
 #include <lvgl.h>
@@ -79,6 +80,19 @@ static void menu_save_sd_cb(void) {
   store_mnemonic_page_show();
 }
 
+/* --- To SeedKeeper --- */
+
+static void return_from_seedkeeper_cb(void) {
+  seedkeeper_backup_page_destroy();
+  backup_menu_page_show();
+}
+
+static void menu_seedkeeper_cb(void) {
+  backup_menu_page_hide();
+  seedkeeper_backup_page_create(lv_screen_active(), return_from_seedkeeper_cb);
+  seedkeeper_backup_page_show();
+}
+
 /* --- Back --- */
 
 static void back_cb(void) {
@@ -107,6 +121,8 @@ void backup_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
                               menu_save_flash_cb);
   ui_menu_add_entry_with_icon(backup_menu, ICON_SD_CARD, "Save to SD",
                               menu_save_sd_cb);
+  ui_menu_add_entry_with_icon(backup_menu, ICON_KEY, "To SeedKeeper",
+                              menu_seedkeeper_cb);
 }
 
 void backup_menu_page_show(void) {
@@ -129,6 +145,7 @@ void backup_menu_page_hide(void) {
 
 void backup_menu_page_destroy(void) {
   session_cleanup_unregister(backup_menu_page_destroy);
+  seedkeeper_backup_page_destroy();
   if (backup_menu) {
     ui_menu_destroy(backup_menu);
     backup_menu = NULL;

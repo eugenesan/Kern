@@ -16,6 +16,7 @@
 #include "addresses.h"
 #include "advanced_tools.h"
 #include "backup/backup_menu.h"
+#include "../seedkeeper/seedkeeper_hub.h"
 #include "public_key.h"
 #include <bsp/pmic.h>
 #include <esp_log.h>
@@ -38,6 +39,17 @@ static void return_from_scan_cb(void);
 static void return_from_load_cb(void);
 static void return_from_advanced_tools_cb(void);
 static void return_from_wallet_settings_cb(void);
+
+static void return_from_seedkeeper_cb(void) {
+  seedkeeper_hub_page_destroy();
+  home_page_show();
+}
+
+static void menu_seedkeeper_cb(void) {
+  home_page_hide();
+  seedkeeper_hub_page_create(lv_screen_active(), return_from_seedkeeper_cb);
+  seedkeeper_hub_page_show();
+}
 
 static void menu_backup_cb(void) {
   home_page_hide();
@@ -191,6 +203,8 @@ void home_page_create(lv_obj_t *parent) {
                               menu_addresses_cb);
   ui_menu_add_entry_with_icon(main_menu, ICON_BOX_ARCHIVE, "Back Up",
                               menu_backup_cb);
+  ui_menu_add_entry_with_icon(main_menu, ICON_KEY, "SeedKeeper",
+                              menu_seedkeeper_cb);
   ui_menu_add_entry_with_icon(main_menu, ICON_TOOLBOX, "Advanced Tools",
                               menu_advanced_tools_cb);
 
@@ -222,6 +236,7 @@ void home_page_hide(void) {
 
 void home_page_destroy(void) {
   session_cleanup_unregister(home_page_destroy);
+  seedkeeper_hub_page_destroy();
   if (power_button) {
     lv_obj_del(power_button);
     power_button = NULL;

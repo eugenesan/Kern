@@ -8,6 +8,7 @@
 #include "../../utils/secure_mem.h"
 #include "../../utils/session_cleanup.h"
 #include "../home/home.h"
+#include "../seedkeeper/seedkeeper_new_seed.h"
 #include "../load_mnemonic/manual_input.h"
 #include "../shared/key_confirmation.h"
 #include "../shared/mnemonic_editor.h"
@@ -117,6 +118,27 @@ static void from_words_cb(void) { warn_and_launch(launch_words); }
 
 static void from_camera_cb(void) { warn_and_launch(launch_camera); }
 
+/* --- From SeedKeeper --- */
+
+static void return_from_seedkeeper_cb(void) {
+  seedkeeper_new_seed_page_destroy();
+  new_mnemonic_menu_page_show();
+}
+
+static void success_from_seedkeeper_cb(void) {
+  seedkeeper_new_seed_page_destroy();
+  new_mnemonic_menu_page_destroy();
+  home_page_create(lv_screen_active());
+  home_page_show();
+}
+
+static void from_seedkeeper_cb(void) {
+  new_mnemonic_menu_page_hide();
+  seedkeeper_new_seed_page_create(lv_screen_active(), return_from_seedkeeper_cb,
+                                  success_from_seedkeeper_cb);
+  seedkeeper_new_seed_page_show();
+}
+
 static void back_cb(void) {
   void (*callback)(void) = return_callback;
   new_mnemonic_menu_page_hide();
@@ -145,6 +167,8 @@ void new_mnemonic_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
                               "From Words", from_words_cb);
   ui_menu_add_entry_with_icon(new_mnemonic_menu, LV_SYMBOL_IMAGE, "From Camera",
                               from_camera_cb);
+  ui_menu_add_entry_with_icon(new_mnemonic_menu, ICON_KEY, "From SeedKeeper",
+                              from_seedkeeper_cb);
   ui_menu_show(new_mnemonic_menu);
 }
 
@@ -160,6 +184,7 @@ void new_mnemonic_menu_page_hide(void) {
 
 void new_mnemonic_menu_page_destroy(void) {
   session_cleanup_unregister(new_mnemonic_menu_page_destroy);
+  seedkeeper_new_seed_page_destroy();
   if (new_mnemonic_menu) {
     ui_menu_destroy(new_mnemonic_menu);
     new_mnemonic_menu = NULL;
