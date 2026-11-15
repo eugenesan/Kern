@@ -29,7 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_SECRETS 16
+#define MAX_SECRETS 64
 #define WORKER_STACK 12288
 
 typedef enum {
@@ -184,6 +184,8 @@ static void card_work(void) {
     header_count = MAX_SECRETS;
     size_t found = MAX_SECRETS;
     if (seedkeeper_list_headers(&sk, headers, &found) != 0) {
+      klog("kern-nexus seedkeeper: list failed sw=%04x found=%zu\n",
+           sk.last_sw, found);
       if (sk.last_sw) {
         char text[64];
         seedkeeper_describe_status(sk.last_sw, text, sizeof(text));
@@ -194,13 +196,14 @@ static void card_work(void) {
       header_count = 0;
       return;
     }
-    header_count = 0;
-    for (size_t i = 0; i < found; i++) {
-      if (headers[i].type == SEEDKEEPER_TYPE_BIP39_MNEMONIC ||
-          (headers[i].type == SEEDKEEPER_TYPE_MASTERSEED &&
-           headers[i].subtype == SEEDKEEPER_SUBTYPE_BIP39))
-        headers[header_count++] = headers[i];
-    }
+    klog("kern-nexus seedkeeper: %zu headers\n", found);
+    for (size_t i = 0; i < found; i++)
+      klog("kern-nexus seedkeeper: header %04x type=%02x subtype=%02x label=%s\n",
+           headers[i].id, headers[i].type, headers[i].subtype,
+           headers[i].label_valid ? headers[i].label : "?");
+    /* Show every secret the card offers.  If the selected one is not a
+     * BIP39 Masterseed, export reports that instead of hiding it. */
+    header_count = found;
     work_rc = 0;
     return;
   }
@@ -213,6 +216,8 @@ static void card_work(void) {
     char passphrase[256];
     size_t passphrase_len = 0;
 
+    klog("kern-nexus seedkeeper: exporting id=%04x\n",
+         headers[selected_header].id);
     if (seedkeeper_export_secret(&sk, headers[selected_header].id, secret,
                                  &secret_len) != 0) {
       if (sk.last_sw) {
@@ -222,9 +227,11 @@ static void card_work(void) {
       } else {
         set_error("Card communication failed");
       }
+      klog("kern-nexus seedkeeper: export failed sw=%04x\n", sk.last_sw);
       memset(secret, 0, sizeof(secret));
       return;
     }
+    klog("kern-nexus seedkeeper: exported %zu bytes\n", secret_len);
     if (seedkeeper_unpack_bip39(secret, secret_len, entropy, sizeof(entropy),
                                 &entropy_len, passphrase, sizeof(passphrase),
                                 &passphrase_len) != 0) {
@@ -293,6 +300,15 @@ static void poll_cb(lv_timer_t *timer) {
     } else if (header_count == 1) {
       selected_header = 0;
       start_export();
+    } else if (access("/data/kern/dev_seed_auto", F_OK) == 0) {
+      for (size_t i = 0; i < header_count; i++) {
+        if (headers[i].type == SEEDKEEPER_TYPE_MASTERSEED &&
+            headers[i].subtype == SEEDKEEPER_SUBTYPE_BIP39) {
+          selected_header = i;
+          start_export();
+          break;
+        }
+      }
     } else {
       /* The menu is built on the UI thread. */
       menu_show();
