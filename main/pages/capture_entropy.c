@@ -14,6 +14,7 @@
 
 #include "../components/video/video.h"
 #include "../core/crypto_utils.h"
+#include "../core/settings.h"
 #include "../core/entropy_pool.h"
 #include "../ui/dialog.h"
 #include "../ui/input_helpers.h"
@@ -64,6 +65,9 @@ static uint8_t *current_display_buffer = NULL;
 static size_t display_buffer_size = 0;
 
 static ppa_client_handle_t cam_ppa_client = NULL;
+// The Nexus 5 publishes Y8 frames, not the RGB565 the PPA path was written
+// for; the picture is cropped to the preview and shown as an L8 image.
+static bool gray_camera = false;
 
 static volatile bool closing = false;
 static volatile bool is_initialized = false;
@@ -88,6 +92,30 @@ static void low_entropy_prompt_cb(bool retry, void *user_data) {
       return_callback();
   }
   // If retry (Yes), do nothing - user stays on camera page
+}
+
+/* The same camera controls as the scanner: the exposure by hand, and a
+ * sweep of the lens.  A tap on the picture captures, so the focus has a
+ * button of its own. */
+static void exposure_down_cb(lv_event_t *e) {
+  (void)e;
+  if (closing)
+    return;
+  (void)app_video_adjust_exposure(-0x100);
+}
+
+static void exposure_up_cb(lv_event_t *e) {
+  (void)e;
+  if (closing)
+    return;
+  (void)app_video_adjust_exposure(0x100);
+}
+
+static void focus_cb(lv_event_t *e) {
+  (void)e;
+  if (closing)
+    return;
+  (void)app_video_refocus();
 }
 
 static void back_btn_cb(lv_event_t *e) {
@@ -137,8 +165,29 @@ static float calculate_estimated_shannon_entropy(const uint8_t *rgb565_data,
   return estimated_entropy;
 }
 
+// The same estimate over an 8-bit picture: the luma preview of the Y8
+// camera, where every pixel is one histogram bin.
+static float calculate_estimated_shannon_entropy_gray(const uint8_t *data,
+                                                      size_t pixel_count) {
+  uint32_t *histogram = heap_caps_calloc(256, sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+  if (!histogram) {
+    histogram = heap_caps_calloc(256, sizeof(uint32_t), MALLOC_CAP_INTERNAL);
+    if (!histogram)
+      return ESTIMATED_ENTROPY_UNAVAILABLE;
+  }
+
+  for (size_t i = 0; i < pixel_count; i++)
+    histogram[data[i]]++;
+
+  float estimated_entropy =
+      estimated_shannon_entropy_from_counts_f(histogram, 256, pixel_count);
+
+  free(histogram);
+  return estimated_entropy;
+}
+
 static bool allocate_buffers(void) {
-  display_buffer_size = CAMERA_WIDTH * CAMERA_HEIGHT * 2;
+  display_buffer_size = CAMERA_WIDTH * CAMERA_HEIGHT * (gray_camera ? 1 : 2);
   display_buffer_size =
       (display_buffer_size + CONFIG_CACHE_L2_CACHE_LINE_SIZE - 1) &
       ~(CONFIG_CACHE_L2_CACHE_LINE_SIZE - 1);
@@ -179,7 +228,7 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
   }
 
   if (!display_buffer_a || !display_buffer_b || !current_display_buffer ||
-      !cam_ppa_client) {
+      (!gray_camera && !cam_ppa_client)) {
     __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
     return;
   }
@@ -190,38 +239,55 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
 
   uint32_t in_w = camera_buf_hes ? camera_buf_hes : CAMERA_INPUT_WIDTH;
   uint32_t in_h = camera_buf_ves ? camera_buf_ves : CAMERA_INPUT_HEIGHT;
-  uint32_t crop_max = (in_w < in_h) ? in_w : in_h;
-  // Snap crop so PPA's Q4.4 scale produces exactly CAMERA_WIDTH; otherwise
-  // the truncated scale leaves a noisy column on the right edge.
-  uint32_t crop = app_video_ppa_snap_crop(crop_max, CAMERA_WIDTH);
-  uint32_t crop_ox = (in_w - crop) / 2;
-  uint32_t crop_oy = (in_h - crop) / 2;
-  float scale = (float)CAMERA_WIDTH / (float)crop;
 
-  ppa_srm_oper_config_t srm = {
-      .in.buffer = camera_buf,
-      .in.pic_w = in_w,
-      .in.pic_h = in_h,
-      .in.block_w = crop,
-      .in.block_h = crop,
-      .in.block_offset_x = crop_ox,
-      .in.block_offset_y = crop_oy,
-      .in.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
-      .out.buffer = back_buffer,
-      .out.buffer_size = display_buffer_size,
-      .out.pic_w = CAMERA_WIDTH,
-      .out.pic_h = CAMERA_HEIGHT,
-      .out.block_offset_x = 0,
-      .out.block_offset_y = 0,
-      .out.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
-      .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
-      .scale_x = scale,
-      .scale_y = scale,
-      .mode = PPA_TRANS_MODE_BLOCKING,
-  };
-  if (ppa_do_scale_rotate_mirror(cam_ppa_client, &srm) != ESP_OK) {
-    __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
-    return;
+  if (gray_camera) {
+    /* A 1:1 crop from the middle of the sensor frame: the preview is
+     * sharp, and the walk that would resize it is not needed. */
+    if (in_w < CAMERA_WIDTH || in_h < CAMERA_HEIGHT) {
+      __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
+      return;
+    }
+    uint32_t crop_x = (in_w - CAMERA_WIDTH) / 2;
+    uint32_t crop_y = (in_h - CAMERA_HEIGHT) / 2;
+    for (uint32_t y = 0; y < CAMERA_HEIGHT; y++) {
+      memcpy(back_buffer + (size_t)y * CAMERA_WIDTH,
+             camera_buf + (size_t)(crop_y + y) * in_w + crop_x,
+             CAMERA_WIDTH);
+    }
+  } else {
+    uint32_t crop_max = (in_w < in_h) ? in_w : in_h;
+    // Snap crop so PPA's Q4.4 scale produces exactly CAMERA_WIDTH; otherwise
+    // the truncated scale leaves a noisy column on the right edge.
+    uint32_t crop = app_video_ppa_snap_crop(crop_max, CAMERA_WIDTH);
+    uint32_t crop_ox = (in_w - crop) / 2;
+    uint32_t crop_oy = (in_h - crop) / 2;
+    float scale = (float)CAMERA_WIDTH / (float)crop;
+
+    ppa_srm_oper_config_t srm = {
+        .in.buffer = camera_buf,
+        .in.pic_w = in_w,
+        .in.pic_h = in_h,
+        .in.block_w = crop,
+        .in.block_h = crop,
+        .in.block_offset_x = crop_ox,
+        .in.block_offset_y = crop_oy,
+        .in.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        .out.buffer = back_buffer,
+        .out.buffer_size = display_buffer_size,
+        .out.pic_w = CAMERA_WIDTH,
+        .out.pic_h = CAMERA_HEIGHT,
+        .out.block_offset_x = 0,
+        .out.block_offset_y = 0,
+        .out.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x = scale,
+        .scale_y = scale,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    if (ppa_do_scale_rotate_mirror(cam_ppa_client, &srm) != ESP_OK) {
+      __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
+      return;
+    }
   }
 
   // Sensor shot noise is real physical entropy and the frame is already here.
@@ -269,11 +335,13 @@ static bool camera_init(void) {
 
   xEventGroupSetBits(camera_event_group, CAMERA_EVENT_TASK_RUN);
 
+  gray_camera = app_video_get_format() == APP_VIDEO_FMT_GREY;
+
   img_dsc = (lv_img_dsc_t){
-      .header = {.cf = LV_COLOR_FORMAT_RGB565,
+      .header = {.cf = gray_camera ? LV_COLOR_FORMAT_L8 : LV_COLOR_FORMAT_RGB565,
                  .w = CAMERA_WIDTH,
                  .h = CAMERA_HEIGHT},
-      .data_size = CAMERA_WIDTH * CAMERA_HEIGHT * 2,
+      .data_size = CAMERA_WIDTH * CAMERA_HEIGHT * (gray_camera ? 1 : 2),
       .data = NULL,
   };
 
@@ -283,20 +351,23 @@ static bool camera_init(void) {
   current_display_buffer = display_buffer_a;
   img_dsc.data = current_display_buffer;
 
-  ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM};
-  if (ppa_register_client(&ppa_cfg, &cam_ppa_client) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to register PPA client");
-    cam_ppa_client = NULL;
-    return false;
+  if (!gray_camera) {
+    ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM};
+    if (ppa_register_client(&ppa_cfg, &cam_ppa_client) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to register PPA client");
+      cam_ppa_client = NULL;
+      return false;
+    }
   }
 
   if (app_video_start(camera_frame_cb, 0) != ESP_OK)
     return false;
 
-  // Apply the wider AE hysteresis + gain cap - without this, the sensor keeps
-  // its init-time +/-8% window and uncapped gain ceiling, which causes
-  // square-wave luminance pulsing under low-light, high-contrast scenes.
-  app_video_set_ae_target(80);
+  // The same exposure target as the scanner, so a capture looks like what
+  // the user saw there.  The page has the same -/+ and focus controls.
+  app_video_set_ae_target(settings_get_ae_target());
+  if (app_video_has_focus_motor())
+    app_video_auto_focus();
 
   return true;
 }
@@ -307,7 +378,11 @@ static void touch_event_cb(lv_event_t *e) {
 
   size_t pixel_count = CAMERA_WIDTH * CAMERA_HEIGHT;
   float estimated_entropy =
-      calculate_estimated_shannon_entropy(current_display_buffer, pixel_count);
+      gray_camera
+          ? calculate_estimated_shannon_entropy_gray(current_display_buffer,
+                                                     pixel_count)
+          : calculate_estimated_shannon_entropy(current_display_buffer,
+                                                pixel_count);
 
   if (estimated_entropy < 0.0f) {
     dialog_show_error_timeout("Not enough memory to check estimated entropy",
@@ -328,7 +403,7 @@ static void touch_event_cb(lv_event_t *e) {
   // XOR-ing means a TRNG that could observe the frame still cannot steer the
   // result: it would have to invert SHA-256 to land on a chosen seed.
   uint8_t mixed[SHA256_LEN * 2];
-  size_t buffer_size = pixel_count * 2;
+  size_t buffer_size = pixel_count * (gray_camera ? 1 : 2);
   bool mixed_ok = false;
 
   if (wally_sha256(current_display_buffer, buffer_size, mixed, SHA256_LEN) ==
@@ -388,6 +463,30 @@ void capture_entropy_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
       theme_create_label(capture_screen, "Tap to capture", false);
   lv_obj_set_style_text_color(instruction, highlight_color(), 0);
   lv_obj_align(instruction, LV_ALIGN_BOTTOM_MID, 0, -theme_default_padding());
+
+  // Exposure by hand and a focus button: the picture is often too dark or
+  // too flat for the capture gate, and a frame that is out of focus has
+  // little detail to draw entropy from.
+  lv_obj_t *controls = lv_obj_create(capture_screen);
+  lv_obj_remove_style_all(controls);
+  lv_obj_set_size(controls, LV_PCT(80), 100);
+  lv_obj_align(controls, LV_ALIGN_BOTTOM_MID, 0, -120);
+  lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *exp_down = theme_create_button(controls, LV_SYMBOL_MINUS, false);
+  lv_obj_set_size(exp_down, 200, 100);
+  lv_obj_add_event_cb(exp_down, exposure_down_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *focus_btn = theme_create_button(controls, "Focus", false);
+  lv_obj_set_size(focus_btn, 300, 100);
+  lv_obj_add_event_cb(focus_btn, focus_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *exp_up = theme_create_button(controls, LV_SYMBOL_PLUS, false);
+  lv_obj_set_size(exp_up, 200, 100);
+  lv_obj_add_event_cb(exp_up, exposure_up_cb, LV_EVENT_CLICKED, NULL);
 
   ui_create_back_button(capture_screen, back_btn_cb);
 
