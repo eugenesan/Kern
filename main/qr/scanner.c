@@ -608,7 +608,28 @@ static void completion_timer_cb(lv_timer_t *timer) {
   }
 }
 
+/* A tap focuses, the way every phone camera does it.  Leaving the page is
+ * the back arrow's job now, so the two do not fight over the same touch. */
 static void touch_event_cb(lv_event_t *e) {
+  (void)e;
+  if (closing || settings_overlay)
+    return;
+  (void)app_video_refocus();
+}
+
+/* The manual exposure strip at the bottom of the preview. */
+static void exposure_down_cb(lv_event_t *e) {
+  (void)e;
+  (void)app_video_adjust_exposure(-0x100);
+}
+
+static void exposure_up_cb(lv_event_t *e) {
+  (void)e;
+  (void)app_video_adjust_exposure(0x100);
+}
+
+static void back_btn_cb(lv_event_t *e) {
+  (void)e;
   if (closing || settings_overlay)
     return;
   closing = true;
@@ -1504,6 +1525,34 @@ void qr_scanner_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
       theme_create_label(qr_scanner_screen, "QR Scanner", false);
   theme_apply_label(title_label, true);
   lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 8);
+
+  /* Leaving the page is the back arrow's job: a tap on the preview
+   * focuses now, as it does on every phone camera. */
+  ui_create_back_button(qr_scanner_screen, back_btn_cb);
+
+  lv_obj_t *hint =
+      theme_create_label(qr_scanner_screen, "Tap to focus", false);
+  theme_apply_label(hint, true);
+  lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -170);
+
+  /* The manual exposure strip: the picture is often too dark or too
+   * bright for the auto-exposure to get right on its own. */
+  lv_obj_t *exp_bar = lv_obj_create(qr_scanner_screen);
+  lv_obj_remove_style_all(exp_bar);
+  lv_obj_set_size(exp_bar, LV_PCT(60), 110);
+  lv_obj_align(exp_bar, LV_ALIGN_BOTTOM_MID, 0, -40);
+  lv_obj_set_flex_flow(exp_bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(exp_bar, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(exp_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *exp_down = theme_create_button(exp_bar, LV_SYMBOL_MINUS, true);
+  lv_obj_set_size(exp_down, 200, 100);
+  lv_obj_add_event_cb(exp_down, exposure_down_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *exp_up = theme_create_button(exp_bar, LV_SYMBOL_PLUS, true);
+  lv_obj_set_size(exp_up, 200, 100);
+  lv_obj_add_event_cb(exp_up, exposure_up_cb, LV_EVENT_CLICKED, NULL);
 
   if (has_ae_control || has_focus_motor) {
     lv_obj_t *settings_btn =

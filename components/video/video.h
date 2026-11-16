@@ -187,6 +187,27 @@ bool app_video_has_focus_motor(void);
 bool app_video_has_ae_control(void);
 
 /**
+ * @brief Ask the camera for a fresh autofocus sweep.
+ *
+ * Focuses on what is in the middle of the frame, the way every phone
+ * camera focuses on what is tapped.
+ *
+ * @return ESP_OK on success, or ESP_FAIL on failure.
+ */
+esp_err_t app_video_refocus(void);
+
+/**
+ * @brief Nudge the exposure by hand.
+ *
+ * Holds the auto-exposure still and moves the exposure by `delta` lines.
+ * A negative delta darkens the picture.
+ *
+ * @param delta Exposure change in lines.
+ * @return ESP_OK on success, or ESP_FAIL on failure.
+ */
+esp_err_t app_video_adjust_exposure(int32_t delta);
+
+/**
  * @brief Snap a crop dimension so PPA's Q4.4 scale lands an exact output.
  *
  * The ESP32-P4 PPA scale fraction has only 4 bits (1/16 steps), so any
