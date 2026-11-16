@@ -197,6 +197,16 @@ bool app_video_has_ae_control(void);
 esp_err_t app_video_refocus(void);
 
 /**
+ * @brief Ask the camera to re-focus quickly, refining the last good step.
+ *
+ * The whole range is only searched when there is no previous good focus,
+ * so this is cheap enough to call when a preview starts.
+ *
+ * @return ESP_OK on success, or ESP_FAIL on failure.
+ */
+esp_err_t app_video_refocus_cached(void);
+
+/**
  * @brief Nudge the exposure by hand.
  *
  * Holds the auto-exposure still and moves the exposure by `delta` lines.

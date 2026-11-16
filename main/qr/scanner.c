@@ -1447,7 +1447,11 @@ static bool camera_init(void) {
     app_video_set_ae_target(settings_get_ae_target());
   }
   if (has_focus_motor) {
-    app_video_set_focus(settings_get_focus_position());
+    // A fixed lens position switches the autofocus sweep off in camd, so
+    // the page would open on whatever step was stored.  Ask for a quick
+    // sweep instead: the picture is focused on what the camera is pointed
+    // at, and a tap or the Focus slider overrides it afterwards.
+    app_video_refocus_cached();
   }
 
   return true;
