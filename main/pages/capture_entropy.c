@@ -241,8 +241,10 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
   uint32_t in_h = camera_buf_ves ? camera_buf_ves : CAMERA_INPUT_HEIGHT;
 
   if (gray_camera) {
-    /* A 1:1 crop from the middle of the sensor frame: the preview is
-     * sharp, and the walk that would resize it is not needed. */
+    /* A 1:1 crop from the middle of the sensor frame, turned through 180
+     * degrees: the sensor is mounted the other way up, which is why the
+     * scanner flips both axes too.  The crop is sharp and the walk that
+     * would resize it is not needed. */
     if (in_w < CAMERA_WIDTH || in_h < CAMERA_HEIGHT) {
       __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
       return;
@@ -250,9 +252,12 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
     uint32_t crop_x = (in_w - CAMERA_WIDTH) / 2;
     uint32_t crop_y = (in_h - CAMERA_HEIGHT) / 2;
     for (uint32_t y = 0; y < CAMERA_HEIGHT; y++) {
-      memcpy(back_buffer + (size_t)y * CAMERA_WIDTH,
-             camera_buf + (size_t)(crop_y + y) * in_w + crop_x,
-             CAMERA_WIDTH);
+      const uint8_t *src_row =
+          camera_buf +
+          (size_t)(crop_y + CAMERA_HEIGHT - 1 - y) * in_w + crop_x;
+      uint8_t *dst = back_buffer + (size_t)y * CAMERA_WIDTH;
+      for (uint32_t x = 0; x < CAMERA_WIDTH; x++)
+        dst[x] = src_row[CAMERA_WIDTH - 1 - x];
     }
   } else {
     uint32_t crop_max = (in_w < in_h) ? in_w : in_h;
