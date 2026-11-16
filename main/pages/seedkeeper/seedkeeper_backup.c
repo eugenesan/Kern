@@ -173,9 +173,11 @@ static void done_import(void *ctx) {
 /* --- lifecycle ---------------------------------------------------------- */
 
 static void card_return_cb(void) {
+  void (*callback)(void) = return_callback;
+
   seedkeeper_backup_page_destroy();
-  if (return_callback)
-    return_callback();
+  if (callback)
+    callback();
 }
 
 static void card_opened(void) {

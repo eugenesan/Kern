@@ -52,12 +52,13 @@ static void words_destroy(void) {
 }
 
 static void words_back_cb(lv_event_t *e) {
+  void (*callback)(void) = return_callback;
   (void)e;
   /* Backing out abandons the whole flow: the seed was never loaded. */
   words_destroy();
   seedkeeper_new_seed_page_destroy();
-  if (return_callback)
-    return_callback();
+  if (callback)
+    callback();
 }
 
 static void words_continue_cb(lv_event_t *e) {
@@ -73,21 +74,25 @@ static void words_continue_cb(lv_event_t *e) {
 }
 
 static void return_from_key_confirmation_cb(void) {
+  void (*callback)(void) = return_callback;
+
   seedkeeper_page_log("kern-nexus newseed: key confirmation returned\n");
   key_confirmation_page_destroy();
   words_destroy();
   seedkeeper_new_seed_page_destroy();
-  if (return_callback)
-    return_callback();
+  if (callback)
+    callback();
 }
 
 static void success_from_key_confirmation_cb(void) {
+  void (*callback)(void) = success_callback;
+
   seedkeeper_page_log("kern-nexus newseed: wallet loaded\n");
   key_confirmation_page_destroy();
   words_destroy();
   seedkeeper_new_seed_page_destroy();
-  if (success_callback)
-    success_callback();
+  if (callback)
+    callback();
 }
 
 /* Splits the mnemonic and lays the words out in a scrollable column. */
