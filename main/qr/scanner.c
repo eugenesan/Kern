@@ -123,6 +123,9 @@ static lv_obj_t *ur_progress_bar = NULL;
 static lv_obj_t *ur_progress_indicator = NULL;
 static int ur_progress_bar_inner_width = 0;
 static void (*return_callback)(void) = NULL;
+// The tap that opened the page is released over it; it must not count as
+// a tap on the preview.
+static uint32_t page_opened_at;
 
 static lv_img_dsc_t img_refresh_dsc;
 static EventGroupHandle_t camera_event_group = NULL;
@@ -614,6 +617,8 @@ static void touch_event_cb(lv_event_t *e) {
   (void)e;
   if (closing || settings_overlay)
     return;
+  if (lv_tick_elaps(page_opened_at) < 500)
+    return;
   (void)app_video_refocus();
 }
 
@@ -855,12 +860,22 @@ static void qr_decode_task(void *pvParameters) {
   k_quirc_result_t qr_result;
   qr_progress_update_t progress_update = {0};
   uint8_t passes_since_yield = 0;
+  // A code that is not being read, after the exposure has had time to
+  // settle on the scene, is a focus problem: ask for a sweep.  It is not
+  // asked for again straight away, and a sweep that kept repeating would
+  // never let the code be read, so only a couple are tried before the
+  // user taps the preview.
+  int no_decode_frames = 0;
+  int sweeps_requested = 0;
+  uint32_t last_sweep_ms = 0;
 #if CONFIG_KERN_SCAN_PROFILING
   uint32_t last_payload_hash = 0;
   int last_part_index = -1;
 #endif
 
   while (true) {
+    bool decoded_this_frame = false;
+
     if (closing || destruction_in_progress)
       break;
 
@@ -948,6 +963,7 @@ static void qr_decode_task(void *pvParameters) {
 #endif
 
           if (part_index >= 0 || qr_parser->total == 1) {
+            decoded_this_frame = true;
             progress_update.format = qr_parser->format;
             bool publish_progress = (qr_parser->format == FORMAT_PMOFN ||
                                      qr_parser->format == FORMAT_BBQR) &&
@@ -993,6 +1009,21 @@ static void qr_decode_task(void *pvParameters) {
       // mnemonic or PSBT fragment - now lives only here, on a task stack that
       // outlives the scan.
       secure_memzero(&qr_result, sizeof(qr_result));
+    }
+
+    if (decoded_this_frame) {
+      no_decode_frames = 0;
+    } else if (!settings_active && !closing) {
+      no_decode_frames++;
+      if (no_decode_frames >= 15 && sweeps_requested < 2 &&
+          lv_tick_elaps(last_sweep_ms) > 5000) {
+        last_sweep_ms = lv_tick_get();
+        no_decode_frames = 0;
+        if (sweeps_requested++ == 0)
+          app_video_refocus();
+        else
+          app_video_refocus_cached();
+      }
     }
 
     if (++passes_since_yield >= QR_DECODE_PASSES_PER_YIELD) {
@@ -1448,10 +1479,10 @@ static bool camera_init(void) {
   }
   if (has_focus_motor) {
     // A fixed lens position switches the autofocus sweep off in camd, so
-    // the page would open on whatever step was stored.  Ask for a quick
-    // sweep instead: the picture is focused on what the camera is pointed
-    // at, and a tap or the Focus slider overrides it afterwards.
-    app_video_refocus_cached();
+    // the page could open on whatever step the Focus slider last left
+    // behind.  Release it: the lens stays where the camera focused it, and
+    // a tap or the slider overrides it again.
+    app_video_auto_focus();
   }
 
   return true;
@@ -1472,6 +1503,7 @@ void qr_scanner_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
 #endif
 
   return_callback = return_cb;
+  page_opened_at = lv_tick_get();
   closing = false;
   sequence_in_progress = false;
   scan_completed = false;

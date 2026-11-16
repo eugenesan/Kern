@@ -199,12 +199,23 @@ esp_err_t app_video_refocus(void);
 /**
  * @brief Ask the camera to re-focus quickly, refining the last good step.
  *
- * The whole range is only searched when there is no previous good focus,
- * so this is cheap enough to call when a preview starts.
+ * The whole range is searched only when there is no previous good focus,
+ * so this is cheap enough to repeat while aiming.
  *
  * @return ESP_OK on success, or ESP_FAIL on failure.
  */
 esp_err_t app_video_refocus_cached(void);
+
+/**
+ * @brief Hand the lens back to the camera's own focus logic.
+ *
+ * Releases a fixed focus position set with app_video_set_focus(), so a
+ * lens that was focused by hand does not stay pinned.  Call this when a
+ * preview starts; a tap or the focus slider overrides it again.
+ *
+ * @return ESP_OK on success, or ESP_FAIL on failure.
+ */
+esp_err_t app_video_auto_focus(void);
 
 /**
  * @brief Nudge the exposure by hand.
