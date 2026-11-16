@@ -31,6 +31,11 @@ static char stored_id[8];
 
 static void return_from_passphrase_cb(void);
 static void passphrase_ready_cb(const char *passphrase);
+static int step_reopen(seedkeeper_card_t *c, void *ctx, char *err,
+                       size_t err_cap);
+static void done_reopen(void *ctx);
+static int step_write(seedkeeper_card_t *c, void *ctx, char *err,
+                      size_t err_cap);
 static int step_import(seedkeeper_card_t *c, void *ctx, char *err,
                        size_t err_cap);
 static void done_import(void *ctx);
@@ -68,8 +73,12 @@ static void passphrase_ready_cb(const char *passphrase) {
   snprintf(secret_passphrase, sizeof(secret_passphrase), "%s",
            passphrase ? passphrase : "");
   passphrase_page_destroy();
-  seedkeeper_page_run("Writing the secret...", step_import, false,
-                       done_import, NULL);
+  /* The label and the passphrase are in hand; now ask for the card.  The
+   * session that was open while the user typed is long gone, and a card
+   * command sent into it lands on the card manager instead of the
+   * applet. */
+  seedkeeper_page_run("Tap the card... (back arrow cancels)", step_reopen, false,
+                       done_reopen, NULL);
 }
 
 /* --- the card work ------------------------------------------------------ */
@@ -88,6 +97,36 @@ static bool seed_fingerprint(const uint8_t *seed, size_t seed_len,
     ok = true;
   bip32_key_free(master);
   return ok;
+}
+
+/* Runs on the worker task.  Brings the card back and logs in again. */
+static int step_reopen(seedkeeper_card_t *c, void *ctx, char *err,
+                       size_t err_cap) {
+  (void)ctx;
+  return seedkeeper_card_relogin(c, err, err_cap);
+}
+
+/* Runs on the UI thread. */
+static void done_reopen(void *ctx) {
+  (void)ctx;
+  seedkeeper_page_run("Hold the card... writing", step_write, false,
+                       done_import, NULL);
+}
+
+/* The write, and its retry.  The first call uses the session the tap just
+ * opened; a retry after the link dropped has to bring the card back
+ * first, and the user is asked for it again. */
+static int step_write(seedkeeper_card_t *c, void *ctx, char *err,
+                      size_t err_cap) {
+  int rc;
+
+  if (!c->logged_in && seedkeeper_card_relogin(c, err, err_cap) != 0)
+    return -1;
+  rc = step_import(c, ctx, err, err_cap);
+  if (rc != 0 && (c->sk.last_sw == 0 || c->sk.last_sw == 0x6E00 ||
+                  c->sk.last_sw == 0x6D00))
+    c->logged_in = 0;
+  return rc;
 }
 
 /* Runs on the worker task. */
@@ -195,8 +234,8 @@ void seedkeeper_backup_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   secret_passphrase[0] = '\0';
   stored_id[0] = '\0';
 
-  seedkeeper_page_create(lv_screen_active(), "Back Up to Card", card_return_cb,
-                          card_opened);
+  seedkeeper_page_create_deferred(lv_screen_active(), "Back Up to Card",
+                                   card_return_cb, card_opened);
 }
 
 void seedkeeper_backup_page_show(void) { seedkeeper_page_show(); }

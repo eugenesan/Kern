@@ -61,6 +61,15 @@ int seedkeeper_card_run(seedkeeper_card_t *card, seedkeeper_op_fn op, void *ctx,
 void seedkeeper_page_create(lv_obj_t *parent, const char *title,
                              void (*return_cb)(void), void (*opened_cb)(void));
 
+/* The same, but the PIN is not checked against the card yet: nothing is
+ * sent until the flow calls seedkeeper_card_relogin().  A flow that has
+ * questions to ask -- a label, a passphrase -- collects them first, so
+ * the card is asked for once, when the write is ready, instead of being
+ * held to the phone while the user types and then found gone. */
+void seedkeeper_page_create_deferred(lv_obj_t *parent, const char *title,
+                                     void (*return_cb)(void),
+                                     void (*opened_cb)(void));
+
 void seedkeeper_page_show(void);
 void seedkeeper_page_hide(void);
 void seedkeeper_page_destroy(void);

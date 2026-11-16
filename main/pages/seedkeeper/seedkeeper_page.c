@@ -35,6 +35,7 @@ static char pin_text[SEEDKEEPER_PIN_MAX + 1];
 static void (*return_callback)(void) = NULL;
 static void (*opened_callback)(void) = NULL;
 
+static bool defer_card_open = false;
 static lv_timer_t *poll_timer = NULL;
 static volatile bool work_done = false;
 static bool working = false;
@@ -176,8 +177,12 @@ int seedkeeper_card_run(seedkeeper_card_t *c, seedkeeper_op_fn op, void *ctx,
   rc = op(c, ctx, err, err_cap);
   if (rc == 0)
     return 0;
-  /* A card status word is final; only a lost link is worth retrying. */
-  if (!retry_on_link_loss || c->sk.last_sw != 0)
+  /* A card status word is final; only a lost link is worth retrying.  A
+   * card that answers "class not supported" is a card that came back to
+   * the field without the applet selected -- the command went to the card
+   * manager -- so that is a lost session too. */
+  if (!retry_on_link_loss ||
+      (c->sk.last_sw != 0 && c->sk.last_sw != 0x6E00 && c->sk.last_sw != 0x6D00))
     return rc;
   if (seedkeeper_card_relogin(c, err, err_cap) != 0)
     return rc;
@@ -398,6 +403,16 @@ static void pin_ready_cb(lv_event_t *e) {
   memcpy(pin_text, text, len + 1);
   ui_secure_clear_textarea(pin_input.textarea);
   ui_text_input_hide(&pin_input);
+
+  if (defer_card_open) {
+    /* Keep the PIN for the login that the flow will run when it is ready
+     * to write; the card is not touched here. */
+    memset(card.pin, 0, sizeof(card.pin));
+    memcpy(card.pin, pin_text, len + 1);
+    done_open(NULL);
+    return;
+  }
+
   seedkeeper_page_run("Tap the card... (back arrow cancels)", step_open, false,
                        done_open, NULL);
 }
@@ -440,6 +455,7 @@ void seedkeeper_page_create(lv_obj_t *parent, const char *title,
                             void (*return_cb)(void), void (*opened_cb)(void)) {
   session_cleanup_register(seedkeeper_page_destroy);
   (void)parent;
+  defer_card_open = false;
   return_callback = return_cb;
   opened_callback = opened_cb;
 
@@ -463,6 +479,13 @@ void seedkeeper_page_create(lv_obj_t *parent, const char *title,
   /* Ask for the PIN before touching the card: no SELECT, status or
    * PIN-less command is sent until the user has entered it. */
   show_pin_input();
+}
+
+void seedkeeper_page_create_deferred(lv_obj_t *parent, const char *title,
+                                     void (*return_cb)(void),
+                                     void (*opened_cb)(void)) {
+  seedkeeper_page_create(parent, title, return_cb, opened_cb);
+  defer_card_open = true;
 }
 
 void seedkeeper_page_show(void) {
@@ -499,6 +522,7 @@ void seedkeeper_page_destroy(void) {
   memset(work_error, 0, sizeof(work_error));
   return_callback = NULL;
   opened_callback = NULL;
+  defer_card_open = false;
   last_step = NULL;
   last_done = NULL;
   last_ctx = NULL;
