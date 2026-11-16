@@ -10,7 +10,10 @@
 #define BRIGHTNESS_MIN 10
 #define AE_TARGET_MIN 2
 #define AE_TARGET_MAX 235
-#define AE_TARGET_DEFAULT 80
+/* The brightness the camera holds, as the 95th percentile of the frame.
+ * 80 was the entropy page's value on the old sensor, and it leaves a
+ * scanner picture visibly dark on this one; 180 is white at ~70 %. */
+#define AE_TARGET_DEFAULT 180
 #define FOCUS_POSITION_MAX 1023
 #define FOCUS_POSITION_DEFAULT 500
 #define QR_DENSITY_MIN 100
