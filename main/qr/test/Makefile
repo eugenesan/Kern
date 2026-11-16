@@ -2,7 +2,11 @@ CC ?= gcc
 CFLAGS ?= -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -std=gnu11 -g
 ROOT := ../../..
 UR_DIR := $(ROOT)/components/cUR
-UR_LIB := $(UR_DIR)/src/libur.a
+# cUR is an upstream component whose own Makefile writes into its source
+# tree.  Build it under this directory instead; override UR_BUILD to keep
+# the objects somewhere else (the kern-nexus scripts use /tmp).
+UR_BUILD ?= $(UR_DIR)/build
+UR_LIB := $(UR_BUILD)/libur.a
 INCLUDES := -I.. -I$(ROOT)/main -I$(ROOT)/components/bbqr/src \
 	-I$(ROOT)/components/deflate_codec/src -I$(UR_DIR)/src
 SOURCES := test_parser.c ../parser.c \
@@ -20,7 +24,8 @@ LDFLAGS := -Wl,--wrap=malloc
 all: $(TARGET) $(PROGRESS_TARGET) $(YUV420_TARGET) $(FRAME_POOL_TARGET)
 
 $(UR_LIB): $(shell find $(UR_DIR)/src -name '*.[ch]' 2>/dev/null)
-	$(MAKE) -C $(UR_DIR) all
+	@mkdir -p $(UR_BUILD)
+	$(MAKE) -C $(UR_DIR) OBJDIR=$(UR_BUILD)/obj TARGET=$(UR_LIB) all
 
 $(TARGET): $(SOURCES) ../parser.h ../../utils/attributes.h \
 	$(ROOT)/components/bbqr/src/bbqr.h $(ROOT)/components/bbqr/src/base32.h \
