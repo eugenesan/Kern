@@ -70,6 +70,11 @@ void seedkeeper_page_create_deferred(lv_obj_t *parent, const char *title,
                                      void (*return_cb)(void),
                                      void (*opened_cb)(void));
 
+/* Runs the flow's own cleanup on the UI thread before the page deletes its
+ * screen, so a view the flow added to the page (a text field, say) is
+ * destroyed while it is still alive.  Set it once, after create. */
+void seedkeeper_page_set_cleanup(void (*cleanup)(void));
+
 void seedkeeper_page_show(void);
 void seedkeeper_page_hide(void);
 void seedkeeper_page_destroy(void);

@@ -34,6 +34,7 @@ static seedkeeper_card_t card;
 static char pin_text[SEEDKEEPER_PIN_MAX + 1];
 static void (*return_callback)(void) = NULL;
 static void (*opened_callback)(void) = NULL;
+static void (*cleanup_callback)(void) = NULL;
 
 static bool defer_card_open = false;
 static lv_timer_t *poll_timer = NULL;
@@ -301,6 +302,9 @@ lv_obj_t *seedkeeper_page_text(const char *text) {
   lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(label, LV_PCT(96));
   lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
+  /* The theme's default label colour is the dim one; a result the user has
+   * to read uses the normal foreground. */
+  theme_apply_label(label, false);
   lv_obj_set_style_text_font(label, theme_font_medium(), 0);
   return label;
 }
@@ -456,6 +460,7 @@ void seedkeeper_page_create(lv_obj_t *parent, const char *title,
   session_cleanup_register(seedkeeper_page_destroy);
   (void)parent;
   defer_card_open = false;
+  cleanup_callback = NULL;
   return_callback = return_cb;
   opened_callback = opened_cb;
 
@@ -488,6 +493,10 @@ void seedkeeper_page_create_deferred(lv_obj_t *parent, const char *title,
   defer_card_open = true;
 }
 
+void seedkeeper_page_set_cleanup(void (*cleanup)(void)) {
+  cleanup_callback = cleanup;
+}
+
 void seedkeeper_page_show(void) {
   if (sk_screen)
     lv_obj_clear_flag(sk_screen, LV_OBJ_FLAG_HIDDEN);
@@ -500,6 +509,14 @@ void seedkeeper_page_hide(void) {
 
 void seedkeeper_page_destroy(void) {
   session_cleanup_unregister(seedkeeper_page_destroy);
+  /* The flow's own view goes first: its objects are children of the
+   * screen below, and destroying them after the screen would touch freed
+   * memory. */
+  if (cleanup_callback) {
+    void (*cleanup)(void) = cleanup_callback;
+    cleanup_callback = NULL;
+    cleanup();
+  }
   kern_nfc_cancel();
   worker_task_wait();
   if (poll_timer) {
@@ -522,6 +539,7 @@ void seedkeeper_page_destroy(void) {
   memset(work_error, 0, sizeof(work_error));
   return_callback = NULL;
   opened_callback = NULL;
+  cleanup_callback = NULL;
   defer_card_open = false;
   last_step = NULL;
   last_done = NULL;

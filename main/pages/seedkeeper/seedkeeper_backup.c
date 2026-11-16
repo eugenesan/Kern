@@ -31,9 +31,6 @@ static char stored_id[8];
 
 static void return_from_passphrase_cb(void);
 static void passphrase_ready_cb(const char *passphrase);
-static int step_reopen(seedkeeper_card_t *c, void *ctx, char *err,
-                       size_t err_cap);
-static void done_reopen(void *ctx);
 static int step_write(seedkeeper_card_t *c, void *ctx, char *err,
                       size_t err_cap);
 static int step_import(seedkeeper_card_t *c, void *ctx, char *err,
@@ -55,6 +52,13 @@ static void label_ready_cb(lv_event_t *e) {
   passphrase_page_show();
 }
 
+/* Runs from the page teardown, before its screen is deleted. */
+static void backup_ui_cleanup(void) {
+  if (label_input.textarea)
+    ui_text_input_destroy(&label_input);
+  passphrase_page_destroy();
+}
+
 static void show_label_input(void) {
   if (!label_input.textarea)
     ui_text_input_create(&label_input, seedkeeper_page_container(), "Label",
@@ -73,12 +77,13 @@ static void passphrase_ready_cb(const char *passphrase) {
   snprintf(secret_passphrase, sizeof(secret_passphrase), "%s",
            passphrase ? passphrase : "");
   passphrase_page_destroy();
-  /* The label and the passphrase are in hand; now ask for the card.  The
-   * session that was open while the user typed is long gone, and a card
-   * command sent into it lands on the card manager instead of the
-   * applet. */
-  seedkeeper_page_run("Tap the card... (back arrow cancels)", step_reopen, false,
-                       done_reopen, NULL);
+  /* The label and the passphrase are in hand; now ask for the card and
+   * write.  Every attempt -- the first one and any retry -- starts from a
+   * fresh select and login: a card that was removed, restarted or left
+   * the field is a new card as far as the applet session is concerned,
+   * and a command sent into the old session lands on the card manager. */
+  seedkeeper_page_run("Tap the card and hold it...", step_write, false,
+                       done_import, NULL);
 }
 
 /* --- the card work ------------------------------------------------------ */
@@ -99,34 +104,15 @@ static bool seed_fingerprint(const uint8_t *seed, size_t seed_len,
   return ok;
 }
 
-/* Runs on the worker task.  Brings the card back and logs in again. */
-static int step_reopen(seedkeeper_card_t *c, void *ctx, char *err,
-                       size_t err_cap) {
-  (void)ctx;
-  return seedkeeper_card_relogin(c, err, err_cap);
-}
-
-/* Runs on the UI thread. */
-static void done_reopen(void *ctx) {
-  (void)ctx;
-  seedkeeper_page_run("Hold the card... writing", step_write, false,
-                       done_import, NULL);
-}
-
-/* The write, and its retry.  The first call uses the session the tap just
- * opened; a retry after the link dropped has to bring the card back
- * first, and the user is asked for it again. */
+/* Runs on the worker task.  Selects the applet, verifies the PIN and
+ * then writes.  The login is redone on every attempt, including a retry:
+ * the card may have left the field or restarted since the last one, and
+ * the selection and the secure channel do not survive that. */
 static int step_write(seedkeeper_card_t *c, void *ctx, char *err,
                       size_t err_cap) {
-  int rc;
-
-  if (!c->logged_in && seedkeeper_card_relogin(c, err, err_cap) != 0)
+  if (seedkeeper_card_relogin(c, err, err_cap) != 0)
     return -1;
-  rc = step_import(c, ctx, err, err_cap);
-  if (rc != 0 && (c->sk.last_sw == 0 || c->sk.last_sw == 0x6E00 ||
-                  c->sk.last_sw == 0x6D00))
-    c->logged_in = 0;
-  return rc;
+  return step_import(c, ctx, err, err_cap);
 }
 
 /* Runs on the worker task. */
@@ -236,6 +222,7 @@ void seedkeeper_backup_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
 
   seedkeeper_page_create_deferred(lv_screen_active(), "Back Up to Card",
                                    card_return_cb, card_opened);
+  seedkeeper_page_set_cleanup(backup_ui_cleanup);
 }
 
 void seedkeeper_backup_page_show(void) { seedkeeper_page_show(); }
@@ -244,9 +231,9 @@ void seedkeeper_backup_page_hide(void) { seedkeeper_page_hide(); }
 
 void seedkeeper_backup_page_destroy(void) {
   session_cleanup_unregister(seedkeeper_backup_page_destroy);
-  if (label_input.textarea)
-    ui_text_input_destroy(&label_input);
-  passphrase_page_destroy();
+  /* The page's cleanup hook has already destroyed the label field if it
+   * was still alive; the calls are safe to repeat. */
+  backup_ui_cleanup();
   seedkeeper_page_destroy();
   memset(secret_passphrase, 0, sizeof(secret_passphrase));
   secret_label[0] = '\0';

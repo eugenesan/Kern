@@ -310,7 +310,11 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
     }
   }
 
-  if (!closing && !dialog_showing && bsp_display_lock(0)) {
+  /* A timeout, not a wait: the UI thread holds this lock while it runs a
+   * click callback, and the capture stops the camera from that same
+   * callback.  A frame that waited here for the lock would never let the
+   * camera thread be joined. */
+  if (!closing && !dialog_showing && bsp_display_lock(20)) {
     if (!closing && camera_img) {
       current_display_buffer = back_buffer;
       img_dsc.data = back_buffer;

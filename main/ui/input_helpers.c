@@ -383,7 +383,8 @@ void ui_secure_clear_textarea(lv_obj_t *textarea) {
 }
 
 void ui_text_input_destroy(ui_text_input_t *input) {
-  ui_secure_clear_textarea(input->textarea);
+  if (input->textarea)
+    ui_secure_clear_textarea(input->textarea);
   if (input->input_group) {
     lv_group_del(input->input_group);
     input->input_group = NULL;
