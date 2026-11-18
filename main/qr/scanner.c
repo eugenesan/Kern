@@ -315,21 +315,53 @@ static void touch_event_cb(lv_event_t *e);
 /* Nearest-neighbour crop+scale for the Y8 path.  At 960 -> 600 a QR module
  * still spans several pixels; the expensive part on this device was the
  * RGB565 conversion, not this row walk. */
+/* Precomputed row/column maps.  The old per-pixel 64-bit divisions cost
+ * ~90 ms per frame at 960x960, which capped the preview at ~5 fps.  The
+ * geometry is constant for a session, so build the maps once. */
+static uint32_t *s_crop_xmap;
+static uint32_t *s_crop_ymap;
+static uint32_t s_crop_map_dw, s_crop_map_dh;
+static uint32_t s_crop_map_x, s_crop_map_y, s_crop_map_size;
+static bool s_crop_map_flip_x, s_crop_map_flip_y;
+
 static void gray_scale_crop(const uint8_t *src, uint32_t sw, uint32_t sh,
                             uint32_t crop_x, uint32_t crop_y, uint32_t crop,
                             uint8_t *dst, uint32_t dw, uint32_t dh,
                             bool flip_x, bool flip_y) {
   (void)sh;
-  for (uint32_t y = 0; y < dh; y++) {
-    uint32_t sy = flip_y ? (dh - 1 - y) : y;
-    sy = crop_y + (uint32_t)(((uint64_t)sy * crop) / dh);
-    const uint8_t *row = src + (size_t)sy * sw;
-    uint8_t *out = dst + (size_t)y * dw;
-    for (uint32_t x = 0; x < dw; x++) {
-      uint32_t sx = flip_x ? (dw - 1 - x) : x;
-      sx = crop_x + (uint32_t)(((uint64_t)sx * crop) / dw);
-      out[x] = row[sx];
+  if (!s_crop_xmap || !s_crop_ymap || s_crop_map_dw != dw ||
+      s_crop_map_dh != dh || s_crop_map_x != crop_x ||
+      s_crop_map_y != crop_y || s_crop_map_size != crop ||
+      s_crop_map_flip_x != flip_x || s_crop_map_flip_y != flip_y) {
+    free(s_crop_xmap);
+    free(s_crop_ymap);
+    s_crop_xmap = malloc((size_t)dw * sizeof(uint32_t));
+    s_crop_ymap = malloc((size_t)dh * sizeof(uint32_t));
+    s_crop_map_dw = dw;
+    s_crop_map_dh = dh;
+    s_crop_map_x = crop_x;
+    s_crop_map_y = crop_y;
+    s_crop_map_size = crop;
+    s_crop_map_flip_x = flip_x;
+    s_crop_map_flip_y = flip_y;
+    if (s_crop_xmap && s_crop_ymap) {
+      for (uint32_t x = 0; x < dw; x++) {
+        uint32_t sx = flip_x ? (dw - 1 - x) : x;
+        s_crop_xmap[x] = crop_x + (uint32_t)(((uint64_t)sx * crop) / dw);
+      }
+      for (uint32_t y = 0; y < dh; y++) {
+        uint32_t sy = flip_y ? (dh - 1 - y) : y;
+        s_crop_ymap[y] = crop_y + (uint32_t)(((uint64_t)sy * crop) / dh);
+      }
     }
+  }
+  if (!s_crop_xmap || !s_crop_ymap)
+    return;
+  for (uint32_t y = 0; y < dh; y++) {
+    const uint8_t *row = src + (size_t)s_crop_ymap[y] * sw;
+    uint8_t *out = dst + (size_t)y * dw;
+    for (uint32_t x = 0; x < dw; x++)
+      out[x] = row[s_crop_xmap[x]];
   }
 }
 
